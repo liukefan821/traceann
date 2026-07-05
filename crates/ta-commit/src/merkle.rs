@@ -140,12 +140,173 @@ pub fn verify(root: &Hash, n_leaves: u64, proof: &MerkleProof, payload: &[u8]) -
     acc == *root
 }
 
+/// Batch opening of multiple leaves with shared-path deduplication.
+///
+/// Prover and verifier walk the SAME bottom-up traversal in ascending
+/// position order per level; a sibling hash is consumed from
+/// `siblings` only when it is not itself derivable from the opened
+/// set. Two adjacent opened leaves therefore share their entire upper
+/// path at zero extra cost. `indices` must be strictly ascending —
+/// that is the one canonical proof form; anything else is rejected.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MultiProof {
+    pub indices: Vec<u64>,
+    /// Needed sibling hashes in traversal order (bottom-up).
+    pub siblings: Vec<Hash>,
+}
+
+impl MerkleTree {
+    /// Batch opening for a strictly ascending set of real-leaf indices.
+    pub fn prove_multi(&self, indices: &[usize]) -> Option<MultiProof> {
+        if indices.is_empty() {
+            return None;
+        }
+        if !indices.windows(2).all(|w| w[0] < w[1]) {
+            return None;
+        }
+        if *indices.last().unwrap() >= self.n_leaves {
+            return None;
+        }
+        let mut known: Vec<usize> = indices.to_vec();
+        let mut siblings = Vec::new();
+        for lvl in 0..self.depth() as usize {
+            let mut next = Vec::with_capacity(known.len());
+            let mut i = 0;
+            while i < known.len() {
+                let pos = known[i];
+                if pos & 1 == 0 && i + 1 < known.len() && known[i + 1] == pos + 1 {
+                    i += 2; // sibling also opened: no hash needed
+                } else {
+                    siblings.push(self.levels[lvl][pos ^ 1]);
+                    i += 1;
+                }
+                next.push(pos >> 1);
+            }
+            known = next; // parents are distinct and ascending
+        }
+        Some(MultiProof {
+            indices: indices.iter().map(|&i| i as u64).collect(),
+            siblings,
+        })
+    }
+}
+
+/// Verify a batch opening: `payloads[j]` claims to be the content of
+/// leaf `proof.indices[j]`. Walks the same traversal as `prove_multi`,
+/// so the sibling stream aligns iff the proof is honest and canonical.
+pub fn verify_multi(
+    root: &Hash,
+    n_leaves: u64,
+    proof: &MultiProof,
+    payloads: &[Vec<u8>],
+) -> bool {
+    let k = proof.indices.len();
+    if k == 0 || payloads.len() != k {
+        return false;
+    }
+    if !proof.indices.windows(2).all(|w| w[0] < w[1]) {
+        return false;
+    }
+    if *proof.indices.last().unwrap() >= n_leaves {
+        return false;
+    }
+    let depth = depth_for(n_leaves as usize);
+    let mut entries: Vec<(u64, Hash)> = proof
+        .indices
+        .iter()
+        .zip(payloads)
+        .map(|(&i, p)| (i, leaf_hash(p)))
+        .collect();
+    let mut sibs = proof.siblings.iter();
+    for _ in 0..depth {
+        let mut next = Vec::with_capacity(entries.len());
+        let mut i = 0;
+        while i < entries.len() {
+            let (pos, h) = entries[i];
+            let parent = if pos & 1 == 0 && i + 1 < entries.len() && entries[i + 1].0 == pos + 1 {
+                let (_, hr) = entries[i + 1];
+                i += 2;
+                node_hash(&h, &hr)
+            } else {
+                let Some(s) = sibs.next() else {
+                    return false;
+                };
+                i += 1;
+                if pos & 1 == 0 {
+                    node_hash(&h, s)
+                } else {
+                    node_hash(s, &h)
+                }
+            };
+            next.push((pos >> 1, parent));
+        }
+        entries = next;
+    }
+    sibs.next().is_none() && entries.len() == 1 && entries[0] == (0, *root)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn lh(b: u8) -> Hash {
         leaf_hash(&[b])
+    }
+
+    #[test]
+    fn multiproof_roundtrip_and_dedup() {
+        let payloads: Vec<Vec<u8>> = (0u8..8).map(|i| vec![i]).collect();
+        let leaves: Vec<Hash> = payloads.iter().map(|p| leaf_hash(p)).collect();
+        let t = MerkleTree::from_leaf_hashes(leaves);
+        let root = t.root();
+        let subsets: Vec<Vec<usize>> = vec![
+            vec![0],
+            vec![0, 7],
+            vec![2, 3],
+            vec![1, 4, 6],
+            (0..8).collect(),
+        ];
+        for subset in subsets {
+            let proof = t.prove_multi(&subset).unwrap();
+            let ps: Vec<Vec<u8>> = subset.iter().map(|&i| payloads[i].clone()).collect();
+            assert!(verify_multi(&root, 8, &proof, &ps));
+        }
+        // An adjacent pair shares its whole upper path: 2 sibling
+        // hashes instead of 2 * depth = 6 for two single proofs.
+        assert_eq!(t.prove_multi(&[2, 3]).unwrap().siblings.len(), 2);
+        // Opening every leaf needs zero sibling hashes.
+        let all: Vec<usize> = (0..8).collect();
+        assert_eq!(t.prove_multi(&all).unwrap().siblings.len(), 0);
+    }
+
+    #[test]
+    fn multiproof_rejects_tampering_and_malformed() {
+        let payloads: Vec<Vec<u8>> = (0u8..5).map(|i| vec![i, i]).collect();
+        let leaves: Vec<Hash> = payloads.iter().map(|p| leaf_hash(p)).collect();
+        let t = MerkleTree::from_leaf_hashes(leaves);
+        let root = t.root();
+        let proof = t.prove_multi(&[1, 3]).unwrap();
+        let good = vec![payloads[1].clone(), payloads[3].clone()];
+        assert!(verify_multi(&root, 5, &proof, &good));
+        // Tampered payload.
+        let mut bad = good.clone();
+        bad[0][0] ^= 1;
+        assert!(!verify_multi(&root, 5, &proof, &bad));
+        // Wrong claimed n => wrong shape => reject.
+        assert!(!verify_multi(&root, 9, &proof, &good));
+        // Non-canonical (unsorted) indices are rejected outright.
+        let mut p2 = proof.clone();
+        p2.indices.swap(0, 1);
+        let rev: Vec<Vec<u8>> = good.iter().rev().cloned().collect();
+        assert!(!verify_multi(&root, 5, &p2, &rev));
+        // Extra sibling breaks stream exhaustion.
+        let mut p3 = proof.clone();
+        p3.siblings.push([0u8; 32]);
+        assert!(!verify_multi(&root, 5, &p3, &good));
+        // Prover rejects malformed requests.
+        assert!(t.prove_multi(&[]).is_none());
+        assert!(t.prove_multi(&[3, 1]).is_none());
+        assert!(t.prove_multi(&[4, 5]).is_none());
     }
 
     #[test]

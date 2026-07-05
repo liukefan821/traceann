@@ -26,6 +26,7 @@
 use crate::fixed::{dist, Metric, QVector};
 use crate::graph::{Graph, GraphError, HnswParams, NodeId};
 use crate::search;
+use crate::view::SliceView;
 
 /// Hard cap on layer indices (P(level >= 30) = M^-30 ~ never).
 pub const MAX_LEVEL: u8 = 30;
@@ -34,7 +35,7 @@ pub const MAX_LEVEL: u8 = 30;
 /// level assignment and test-data generation, where we need a
 /// deterministic, well-mixed integer stream.
 #[inline]
-pub(crate) fn splitmix64(x: u64) -> u64 {
+pub fn splitmix64(x: u64) -> u64 {
     let mut z = x.wrapping_add(0x9E37_79B9_7F4A_7C15);
     z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
     z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
@@ -140,6 +141,14 @@ impl HnswIndex {
         &self.graph
     }
 
+    /// Full read-only view over this index (the prover's view).
+    pub fn view(&self) -> SliceView<'_> {
+        SliceView {
+            graph: &self.graph,
+            vectors: &self.vectors,
+        }
+    }
+
     pub fn vector(&self, id: NodeId) -> Option<&QVector> {
         self.vectors.get(id as usize)
     }
@@ -174,7 +183,14 @@ impl HnswIndex {
         // Phase 1: greedy descent on layers above lvl.
         let mut lc = old_max;
         while lc > lvl {
-            ep = search::greedy_search(&self.graph, &self.vectors, self.metric, &q, ep, lc);
+            ep = search::greedy_search(
+                &SliceView { graph: &self.graph, vectors: &self.vectors },
+                self.metric,
+                &q,
+                ep,
+                lc,
+            )
+            .expect("full view cannot miss");
             lc -= 1;
         }
 
@@ -182,14 +198,14 @@ impl HnswIndex {
         let m = self.graph.params().m;
         for layer in (0..=lvl.min(old_max)).rev() {
             let w = search::search_layer(
-                &self.graph,
-                &self.vectors,
+                &SliceView { graph: &self.graph, vectors: &self.vectors },
                 self.metric,
                 &q,
                 ep,
                 self.ef_construction,
                 layer,
-            );
+            )
+            .expect("full view cannot miss");
             let selected = select_neighbors_heuristic(&self.vectors, self.metric, &w, m);
             for &(_, n) in &selected {
                 self.graph.add_edge(id, n, layer)?;
@@ -222,8 +238,9 @@ impl HnswIndex {
         Ok(id)
     }
 
-    /// Query: greedy-descend the upper layers, best-first at layer 0,
-    /// return the top-k as `(dist, id)` ascending.
+    /// Query: delegates to the single shared engine
+    /// (`search::search_with_view`) over the full view — the same
+    /// function the verifier replays over a partial view.
     pub fn search(&self, q: &QVector, k: usize, ef: usize) -> Result<Vec<(i64, NodeId)>, BuildError> {
         if q.dim() != self.dim {
             return Err(BuildError::DimMismatch {
@@ -231,24 +248,14 @@ impl HnswIndex {
                 got: q.dim(),
             });
         }
-        let Some(mut ep) = self.graph.entry() else {
+        let Some(entry) = self.graph.entry() else {
             return Ok(Vec::new());
         };
         let max = self.graph.max_level().expect("entry implies max_level");
-        for lc in (1..=max).rev() {
-            ep = search::greedy_search(&self.graph, &self.vectors, self.metric, q, ep, lc);
-        }
-        let mut w = search::search_layer(
-            &self.graph,
-            &self.vectors,
-            self.metric,
-            q,
-            ep,
-            ef.max(k).max(1),
-            0,
-        );
-        w.truncate(k);
-        Ok(w)
+        Ok(
+            search::search_with_view(&self.view(), self.metric, entry, max, q, k, ef)
+                .expect("full view cannot miss"),
+        )
     }
 }
 

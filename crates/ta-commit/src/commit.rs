@@ -103,6 +103,53 @@ pub fn leaf_payload(idx: &HnswIndex, id: NodeId) -> Option<Vec<u8>> {
     Some(out)
 }
 
+/// A leaf payload parsed back into structured form (verifier side).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DecodedNode {
+    pub id: NodeId,
+    pub level: u8,
+    /// `neighbors[l]` = adjacency at layer `l`, exactly as committed.
+    pub neighbors: Vec<Vec<NodeId>>,
+    pub vector: ta_core::fixed::QVector,
+}
+
+/// Strict inverse of [`leaf_payload`]. Consumes the byte string
+/// exactly — any missing or trailing byte yields `None` — so a payload
+/// has one and only one parse (non-malleable).
+pub fn decode_leaf_payload(payload: &[u8], dim: usize) -> Option<DecodedNode> {
+    fn take<'a>(p: &mut &'a [u8], n: usize) -> Option<&'a [u8]> {
+        if p.len() < n {
+            return None;
+        }
+        let (a, b) = p.split_at(n);
+        *p = b;
+        Some(a)
+    }
+    let mut p = payload;
+    let id = u32::from_le_bytes(take(&mut p, 4)?.try_into().ok()?);
+    let level = take(&mut p, 1)?[0];
+    let mut neighbors = Vec::with_capacity(level as usize + 1);
+    for _ in 0..=level {
+        let cnt = u16::from_le_bytes(take(&mut p, 2)?.try_into().ok()?) as usize;
+        let mut list = Vec::with_capacity(cnt);
+        for _ in 0..cnt {
+            list.push(u32::from_le_bytes(take(&mut p, 4)?.try_into().ok()?));
+        }
+        neighbors.push(list);
+    }
+    let vec_bytes = take(&mut p, dim)?;
+    if !p.is_empty() {
+        return None;
+    }
+    let vector = ta_core::fixed::QVector(vec_bytes.iter().map(|&b| b as i8).collect());
+    Some(DecodedNode {
+        id,
+        level,
+        neighbors,
+        vector,
+    })
+}
+
 /// Commit a built index: hash every node's canonical payload into a
 /// Merkle tree and bind all replay-relevant parameters into δ.
 pub fn commit_index(idx: &HnswIndex) -> IndexCommitment {
@@ -146,6 +193,29 @@ mod tests {
             idx.insert(QVector(v.to_vec())).unwrap();
         }
         idx
+    }
+
+    #[test]
+    fn leaf_payload_decodes_back_exactly() {
+        let idx = tiny(5);
+        for id in 0..idx.len() as u32 {
+            let payload = leaf_payload(&idx, id).unwrap();
+            let node = decode_leaf_payload(&payload, idx.dim()).unwrap();
+            assert_eq!(node.id, id);
+            assert_eq!(node.level, idx.graph().level(id).unwrap());
+            for l in 0..=node.level {
+                assert_eq!(
+                    node.neighbors[l as usize].as_slice(),
+                    idx.graph().neighbors(id, l).unwrap()
+                );
+            }
+            assert_eq!(&node.vector, idx.vector(id).unwrap());
+            // Strict length: trailing or missing bytes kill the parse.
+            let mut long = payload.clone();
+            long.push(0);
+            assert!(decode_leaf_payload(&long, idx.dim()).is_none());
+            assert!(decode_leaf_payload(&payload[..payload.len() - 1], idx.dim()).is_none());
+        }
     }
 
     #[test]
