@@ -1,0 +1,10 @@
+[package]
+name = "ta-bench"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+
+[dependencies]
+ta-core = { path = "../ta-core" }
+ta-commit = { path = "../ta-commit" }
+ta-proof = { path = "../ta-proof" }
