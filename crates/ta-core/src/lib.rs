@@ -5,3 +5,4 @@
 //! a best-first search whose traversal can be replayed by a verifier.
 
 pub mod fixed;
+pub mod graph;
