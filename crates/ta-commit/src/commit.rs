@@ -23,7 +23,7 @@ use ta_core::build::HnswIndex;
 use ta_core::fixed::Metric;
 use ta_core::graph::NodeId;
 
-use crate::merkle::{leaf_hash, Hash, MerkleProof, MerkleTree};
+use crate::merkle::{leaf_hash, Hash, MerkleProof, MerkleTree, MultiProof};
 
 /// Version-bearing domain string; bump on any format change.
 pub const DIGEST_DOMAIN: &[u8] = b"traceann/digest/v1";
@@ -87,6 +87,13 @@ impl IndexCommitment {
     /// Opening for node `id` against `digest().root`.
     pub fn prove_node(&self, id: NodeId) -> Option<MerkleProof> {
         self.tree.prove(id as usize)
+    }
+
+    /// Batch opening for an ascending set of node ids (the prover's
+    /// touched set, as yielded by `RecordingView::into_touched`).
+    pub fn prove_nodes(&self, ids: &[NodeId]) -> Option<MultiProof> {
+        let idx: Vec<usize> = ids.iter().map(|&i| i as usize).collect();
+        self.tree.prove_multi(&idx)
     }
 }
 

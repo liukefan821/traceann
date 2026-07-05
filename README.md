@@ -15,6 +15,8 @@ cargo test
 ## Workspace layout
 
 - `crates/ta-core` — deterministic HNSW core (fixed-point arithmetic, graph, search)
+- `crates/ta-commit` — blake3 Merkle commitment layer producing the digest δ
+- `crates/ta-proof` — Tier-1 query proofs: prover, six-stage verifier, adversarial tests
 - `specs/` — threat model, soundness notes, related-work survey
 
 ## License

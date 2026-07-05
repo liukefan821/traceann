@@ -72,3 +72,11 @@ dependencies = [
 [[package]]
 name = "ta-core"
 version = "0.1.0"
+
+[[package]]
+name = "ta-proof"
+version = "0.1.0"
+dependencies = [
+ "ta-commit",
+ "ta-core",
+]
