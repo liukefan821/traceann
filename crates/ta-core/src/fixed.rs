@@ -67,9 +67,36 @@ pub fn quantize(x: &[f32], scale: f32) -> QVector {
     )
 }
 
+/// Distance metric. Bound into the committed digest δ so server and
+/// verifier agree on the ordering semantics.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Metric {
+    L2Sq,
+    InnerProduct,
+}
+
+/// Deterministic integer "distance": **smaller is better under both
+/// metrics**. Inner product is negated so a single ordering convention
+/// rules the entire codebase and the replay spec. Magnitudes are far
+/// below `i64::MAX` (see module doc), so negation cannot overflow.
+pub fn dist(metric: Metric, a: &QVector, b: &QVector) -> i64 {
+    match metric {
+        Metric::L2Sq => a.l2sq(b),
+        Metric::InnerProduct => -a.dot(b),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dist_ip_is_negated_dot() {
+        let a = QVector(vec![1, 2, 3]);
+        let b = QVector(vec![4, -5, 6]);
+        assert_eq!(dist(Metric::InnerProduct, &a, &b), -(4 - 10 + 18));
+        assert_eq!(dist(Metric::L2Sq, &a, &b), a.l2sq(&b));
+    }
 
     #[test]
     fn dot_basic() {

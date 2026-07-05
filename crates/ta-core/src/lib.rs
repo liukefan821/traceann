@@ -4,5 +4,7 @@
 //! integer-only distance arithmetic, canonical orderings, and (later)
 //! a best-first search whose traversal can be replayed by a verifier.
 
+pub mod build;
 pub mod fixed;
 pub mod graph;
+pub mod search;
