@@ -190,7 +190,7 @@ impl HnswIndex {
                 self.ef_construction,
                 layer,
             );
-            let selected = select_neighbors_heuristic(&self.vectors, self.metric, &q, &w, m);
+            let selected = select_neighbors_heuristic(&self.vectors, self.metric, &w, m);
             for &(_, n) in &selected {
                 self.graph.add_edge(id, n, layer)?;
             }
@@ -211,7 +211,7 @@ impl HnswIndex {
                     pool.push((dist(self.metric, &nv, &self.vectors[id as usize]), id));
                     pool.sort_unstable();
                     let keep =
-                        select_neighbors_heuristic(&self.vectors, self.metric, &nv, &pool, cap);
+                        select_neighbors_heuristic(&self.vectors, self.metric, &pool, cap);
                     let mut ids: Vec<NodeId> = keep.iter().map(|&(_, x)| x).collect();
                     ids.sort_unstable();
                     self.graph.replace_neighbors(n, layer, ids)?;
@@ -254,13 +254,14 @@ impl HnswIndex {
 
 /// HNSW Algorithm 4 (simplified: no extendCandidates /
 /// keepPrunedConnections). `cands` must be sorted ascending by
-/// `(dist, id)` relative to `base`; returns at most `m` kept entries in
-/// scan order. Keep rule: `e` survives iff `dist(e, base) < dist(e, r)`
-/// for every already-kept `r` (ties reject — strict, deterministic).
+/// `(dist, id)`, where dist is measured to a common base point; returns
+/// at most `m` kept entries in scan order. Keep rule: `e` survives iff
+/// `dist(e, base) < dist(e, r)` for every already-kept `r` — and since
+/// `dist(e, base)` is exactly the `d_e` stored in `cands`, the base
+/// vector itself is never needed here.
 pub(crate) fn select_neighbors_heuristic(
     vectors: &[QVector],
     metric: Metric,
-    base: &QVector,
     cands: &[(i64, NodeId)],
     m: usize,
 ) -> Vec<(i64, NodeId)> {

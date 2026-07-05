@@ -1,0 +1,9 @@
+[package]
+name = "ta-commit"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+
+[dependencies]
+blake3 = "1"
+ta-core = { path = "../ta-core" }
