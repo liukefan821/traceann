@@ -53,3 +53,23 @@ Every knob fixes a failure mode we observed empirically:
 
 `cargo run -p ta-bench --release -- paper uniform` reproduces the
 pathological uniform baseline for comparison.
+
+## SIFT1M (real data)
+
+```bash
+bash datasets/download_sift1m.sh
+cargo run -p ta-bench --release -- sift datasets/sift > bench/results/sift1m.csv
+```
+
+SIFT descriptors are integer-valued in [0, 255]; the affine shift
+`q = x - 128` embeds them into i8 **losslessly** (squared L2 is
+translation-invariant), so recall is measured against the official
+float ground truth with zero quantization confound. Dataset files are
+git-ignored (~600 MB on disk).
+
+## Known limitation (synthetic n sweep)
+
+Recall in the synthetic `n` sweep degrades around n = 100k because
+~n/32 cluster centroids saturate the fixed 16-dim global subspace; a
+future revision should scale the global subspace dimension with
+log(n). Real datasets are unaffected.

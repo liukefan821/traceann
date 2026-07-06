@@ -16,6 +16,8 @@ use ta_core::fixed::{dist, Metric, QVector};
 use ta_proof::prover::prove_query;
 use ta_proof::verifier::verify_query;
 
+mod fvecs;
+
 /// Per-operation repetitions; the minimum is kept.
 const REPS: usize = 3;
 
@@ -331,8 +333,151 @@ fn run(cfg: &Config, data: Data) {
     }
 }
 
+
+/// SIFT1M evaluation: lossless i8 shift (offset = 128), official
+/// ground-truth recall, same CSV schema as the synthetic sweeps.
+fn run_sift(dir: &str) {
+    let base_p = format!("{dir}/sift_base.fvecs");
+    let query_p = format!("{dir}/sift_query.fvecs");
+    let gt_p = format!("{dir}/sift_groundtruth.ivecs");
+    for p in [&base_p, &query_p, &gt_p] {
+        if !std::path::Path::new(p).exists() {
+            eprintln!("missing {p} — run datasets/download_sift1m.sh first");
+            std::process::exit(2);
+        }
+    }
+    eprintln!("[sift] loading (lossless i8 shift, offset=128) ...");
+    let t = Instant::now();
+    let (d, base, clip_b) =
+        fvecs::load_fvecs_quantized(&base_p, 128.0, 1.0, 0).expect("read sift_base.fvecs");
+    let (dq, queries, clip_q) =
+        fvecs::load_fvecs_quantized(&query_p, 128.0, 1.0, 0).expect("read sift_query.fvecs");
+    assert_eq!(d, dq, "base/query dimension mismatch");
+    let gt = fvecs::read_ivecs(&gt_p).expect("read sift_groundtruth.ivecs");
+    if clip_b + clip_q != 0 {
+        eprintln!(
+            "    WARNING: {} clipped components — SIFT should embed losslessly",
+            clip_b + clip_q
+        );
+    }
+    eprintln!(
+        "    {} base / {} query vectors, d={}, loaded in {:.1}s",
+        base.len(),
+        queries.len(),
+        d,
+        t.elapsed().as_secs_f64()
+    );
+
+    let t = Instant::now();
+    let mut idx = HnswIndex::new(
+        d,
+        Metric::L2Sq,
+        BuildParams {
+            m: 16,
+            ef_construction: 200,
+            seed: 42,
+        },
+    );
+    let n = base.len();
+    for (i, v) in base.into_iter().enumerate() {
+        idx.insert(v).unwrap();
+        if (i + 1) % 100_000 == 0 {
+            eprintln!(
+                "    inserted {}/{} ({:.0}s)",
+                i + 1,
+                n,
+                t.elapsed().as_secs_f64()
+            );
+        }
+    }
+    let build_ms = t.elapsed().as_secs_f64() * 1e3;
+    let t = Instant::now();
+    let com = commit_index(&idx);
+    let commit_ms = t.elapsed().as_secs_f64() * 1e3;
+    let dg = com.digest();
+    eprintln!("    build {build_ms:.0} ms, commit {commit_ms:.0} ms");
+
+    let k = 10usize;
+    let timed_q = queries.len().min(100);
+    let recall_q = queries.len().min(gt.len()).min(1000);
+
+    for ef in [16usize, 32, 64, 128, 256] {
+        for q in queries.iter().take(3) {
+            black_box(idx.search(q, k, ef).unwrap());
+        }
+        let mut s_us = Vec::new();
+        let mut p_us = Vec::new();
+        let mut v_us = Vec::new();
+        let mut opened = Vec::new();
+        let mut bytes = Vec::new();
+        for q in queries.iter().take(timed_q) {
+            s_us.push(time_us(|| idx.search(q, k, ef).unwrap()));
+            p_us.push(time_us(|| prove_query(&idx, &com, q, k, ef).unwrap()));
+            let proof = prove_query(&idx, &com, q, k, ef).unwrap();
+            v_us.push(time_us(|| verify_query(dg, q, k, ef, &proof).unwrap()));
+            opened.push(proof.opened() as f64);
+            bytes.push(proof.size_bytes() as f64);
+        }
+        let mut hits = 0usize;
+        for (qi, q) in queries.iter().take(recall_q).enumerate() {
+            let truth: std::collections::HashSet<u32> =
+                gt[qi].iter().take(k).copied().collect();
+            let got = idx.search(q, k, ef).unwrap();
+            hits += got.iter().filter(|&&(_, id)| truth.contains(&id)).count();
+        }
+        let recall = hits as f64 / (k * recall_q) as f64;
+
+        let opened_med = median(&mut opened.clone());
+        let opened_p95 = p95(&mut opened.clone());
+        let bytes_med = median(&mut bytes.clone());
+        let bytes_p95 = p95(&mut bytes.clone());
+        let s_med = median(&mut s_us.clone());
+        let p_med = median(&mut p_us.clone());
+        let v_med = median(&mut v_us.clone());
+        println!(
+            "sift,sift1m,{},{},16,200,{},{},{},{:.0},{:.0},{:.4},{:.1},{:.1},{:.0},{:.0},{:.1},{:.1},{:.1},{:.2}",
+            idx.len(),
+            d,
+            ef,
+            k,
+            timed_q,
+            build_ms,
+            commit_ms,
+            recall,
+            opened_med,
+            opened_p95,
+            bytes_med,
+            bytes_p95,
+            s_med,
+            p_med,
+            v_med,
+            p_med / s_med,
+        );
+        eprintln!(
+            "    ef={ef}: opened_med={opened_med:.0} proof_med={bytes_med:.0}B \
+             search={s_med:.0}us prove={p_med:.0}us verify={v_med:.0}us recall={recall:.3}"
+        );
+    }
+}
+
 fn main() {
-    let preset = std::env::args().nth(1).unwrap_or_else(|| "smoke".to_string());
+    let arg1 = std::env::args().nth(1).unwrap_or_else(|| "smoke".to_string());
+    println!(
+        "sweep,data,n,d,m,ef_construction,ef,k,queries,build_ms,commit_ms,recall_at_k,\
+         opened_med,opened_p95,proof_bytes_med,proof_bytes_p95,\
+         search_us_med,prove_us_med,verify_us_med,prove_over_search"
+    );
+    if arg1 == "sift" {
+        let Some(dir) = std::env::args().nth(2) else {
+            eprintln!("usage: ta-bench sift <dir>  (dir with sift_*.fvecs/ivecs)");
+            std::process::exit(2);
+        };
+        let t0 = Instant::now();
+        run_sift(&dir);
+        eprintln!("done in {:.1}s", t0.elapsed().as_secs_f64());
+        return;
+    }
+    let preset = arg1;
     let data = match std::env::args().nth(2).as_deref() {
         None | Some("clustered") => Data::Clustered,
         Some("uniform") => Data::Uniform,
@@ -342,11 +487,6 @@ fn main() {
         }
     };
     let cfgs = presets(&preset);
-    println!(
-        "sweep,data,n,d,m,ef_construction,ef,k,queries,build_ms,commit_ms,recall_at_k,\
-         opened_med,opened_p95,proof_bytes_med,proof_bytes_p95,\
-         search_us_med,prove_us_med,verify_us_med,prove_over_search"
-    );
     let t0 = Instant::now();
     for c in &cfgs {
         run(c, data);
