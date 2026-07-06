@@ -29,6 +29,82 @@ fn hv(seed: u64, i: u64, d: usize) -> QVector {
     QVector(v)
 }
 
+const GOLD: u64 = 0x9E37_79B9_7F4A_7C15;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Data {
+    Uniform,
+    Clustered,
+}
+
+fn data_name(d: Data) -> &'static str {
+    match d {
+        Data::Uniform => "uniform",
+        Data::Clustered => "clustered",
+    }
+}
+
+/// ~32 points per planted cluster. Small clusters are load-bearing:
+/// if cluster size >= ef_construction, every build-time candidate set
+/// is all-intra-cluster and layer 0 degenerates into disconnected
+/// islands (cross-cluster navigation then hangs on the sparse upper
+/// layers alone). With 32-point clusters, W always contains
+/// cross-cluster candidates and bridges form.
+fn clusters_for(n: usize) -> u64 {
+    ((n / 32).max(16)) as u64
+}
+
+/// Synthetic data generator.
+///
+/// Uniform random vectors suffer extreme distance concentration in
+/// high dimensions: all pairs become nearly equidistant, ANN recall
+/// collapses (falls with d and with n), and the numbers say nothing
+/// about real embedding workloads. `Clustered` plants Gaussian-ish
+/// blobs — centroid components in [-96, 96], per-point noise in
+/// [-31, 31] — the standard structured synthetic benchmark, still
+/// fully integer and deterministic.
+fn gen_point(seed: u64, kind: Data, i: u64, d: usize, clusters: u64) -> QVector {
+    match kind {
+        Data::Uniform => hv(seed, i, d),
+        Data::Clustered => {
+            let c = splitmix64(seed ^ 0xC1 ^ i.wrapping_mul(GOLD)) % clusters;
+            let mut cs = splitmix64(seed ^ 0xCE ^ c.wrapping_mul(GOLD));
+            let mut ns = splitmix64(seed ^ 0x11 ^ i.wrapping_mul(GOLD));
+            // Low intrinsic dimensionality: noise lives on ~S
+            // cluster-specific dims; every other coordinate equals the
+            // centroid exactly. Real embeddings behave the same way
+            // (fast-decaying spectrum) — without this, the
+            // within-cluster subproblem is again uniform-random high-d
+            // and distance concentration kills recall.
+            const S: usize = 16;
+            let stride = (d / S).max(1) as u64;
+            let mut v = Vec::with_capacity(d);
+            for t in 0..d {
+                cs = splitmix64(cs);
+                ns = splitmix64(ns);
+                // Centroids live in a GLOBAL ~S-dim subspace: without
+                // this, 100s of centroids are mutually near-equidistant
+                // in high ambient d and coarse navigation has no
+                // gradient to follow (observed as recall stuck at ~0.6
+                // for ef=64 while ef=256 reached ~0.95).
+                let g_active = splitmix64(
+                    seed ^ 0x67 ^ (t as u64).wrapping_mul(0xD6E8_FEB8_6659_FD93),
+                ) % stride
+                    == 0;
+                let cent = if g_active { (cs % 193) as i64 - 96 } else { 0 };
+                let active = splitmix64(
+                    seed ^ 0xA5 ^ c.wrapping_mul(GOLD)
+                        ^ (t as u64).wrapping_mul(0xD6E8_FEB8_6659_FD93),
+                ) % stride
+                    == 0;
+                let noise = if active { (ns % 63) as i64 - 31 } else { 0 };
+                v.push((cent + noise).clamp(-127, 127) as i8);
+            }
+            QVector(v)
+        }
+    }
+}
+
 struct Config {
     sweep: &'static str,
     n: usize,
@@ -67,6 +143,17 @@ fn presets(name: &str) -> Vec<Config> {
                 recall_queries: 5,
             },
         ],
+        "mid" => vec![Config {
+            sweep: "mid",
+            n: 20_000,
+            d: 128,
+            m: 16,
+            efc: 200,
+            efs: &[16, 64, 256],
+            k: 10,
+            queries: 30,
+            recall_queries: 15,
+        }],
         "paper" => {
             let mut v = Vec::new();
             for d in [64, 128, 256, 512, 768] {
@@ -75,7 +162,7 @@ fn presets(name: &str) -> Vec<Config> {
                     n: 50_000,
                     d,
                     m: 16,
-                    efc: 100,
+                    efc: 200,
                     efs: &[64],
                     k: 10,
                     queries: 50,
@@ -87,7 +174,7 @@ fn presets(name: &str) -> Vec<Config> {
                 n: 50_000,
                 d: 128,
                 m: 16,
-                efc: 100,
+                efc: 200,
                 efs: &[16, 32, 64, 128, 256],
                 k: 10,
                 queries: 50,
@@ -99,7 +186,7 @@ fn presets(name: &str) -> Vec<Config> {
                     n,
                     d: 128,
                     m: 16,
-                    efc: 100,
+                    efc: 200,
                     efs: &[64],
                     k: 10,
                     queries: 50,
@@ -109,7 +196,7 @@ fn presets(name: &str) -> Vec<Config> {
             v
         }
         other => {
-            eprintln!("unknown preset '{other}' (expected: smoke | paper)");
+            eprintln!("unknown preset '{other}' (expected: smoke | mid | paper)");
             std::process::exit(2);
         }
     }
@@ -140,10 +227,11 @@ fn p95(v: &mut [f64]) -> f64 {
     v[i]
 }
 
-fn run(cfg: &Config) {
+fn run(cfg: &Config, data: Data) {
+    let clusters = clusters_for(cfg.n);
     eprintln!(
-        "[{}] building n={} d={} m={} efc={} ...",
-        cfg.sweep, cfg.n, cfg.d, cfg.m, cfg.efc
+        "[{}/{}] building n={} d={} m={} efc={} ...",
+        cfg.sweep, data_name(data), cfg.n, cfg.d, cfg.m, cfg.efc
     );
     let t = Instant::now();
     let mut idx = HnswIndex::new(
@@ -156,7 +244,7 @@ fn run(cfg: &Config) {
         },
     );
     for i in 0..cfg.n {
-        idx.insert(hv(0xDA7A, i as u64, cfg.d)).unwrap();
+        idx.insert(gen_point(0xDA7A, data, i as u64, cfg.d, clusters)).unwrap();
     }
     let build_ms = t.elapsed().as_secs_f64() * 1e3;
 
@@ -169,7 +257,7 @@ fn run(cfg: &Config) {
     for &ef in cfg.efs {
         // Warm caches before measuring.
         for w in 0..3u64 {
-            let q = hv(0xC0FFEE, w, cfg.d);
+            let q = gen_point(0xC0FFEE, data, w, cfg.d, clusters);
             black_box(idx.search(&q, cfg.k, ef).unwrap());
         }
 
@@ -179,7 +267,7 @@ fn run(cfg: &Config) {
         let mut opened = Vec::new();
         let mut bytes = Vec::new();
         for qi in 0..cfg.queries {
-            let q = hv(0xBEEF, qi, cfg.d);
+            let q = gen_point(0xBEEF, data, qi, cfg.d, clusters);
             s_us.push(time_us(|| idx.search(&q, cfg.k, ef).unwrap()));
             p_us.push(time_us(|| prove_query(&idx, &com, &q, cfg.k, ef).unwrap()));
             let proof = prove_query(&idx, &com, &q, cfg.k, ef).unwrap();
@@ -193,7 +281,7 @@ fn run(cfg: &Config) {
         // Engine recall vs exact brute force on a query subsample.
         let mut hits = 0usize;
         for qi in 0..cfg.recall_queries {
-            let q = hv(0xBEEF, qi, cfg.d);
+            let q = gen_point(0xBEEF, data, qi, cfg.d, clusters);
             let mut exact: Vec<(i64, u32)> = (0..cfg.n as u32)
                 .map(|id| (dist(Metric::L2Sq, &q, idx.vector(id).unwrap()), id))
                 .collect();
@@ -214,8 +302,9 @@ fn run(cfg: &Config) {
         let v_med = median(&mut v_us.clone());
 
         println!(
-            "{},{},{},{},{},{},{},{},{:.0},{:.0},{:.4},{:.1},{:.1},{:.0},{:.0},{:.1},{:.1},{:.1},{:.2}",
+            "{},{},{},{},{},{},{},{},{},{:.0},{:.0},{:.4},{:.1},{:.1},{:.0},{:.0},{:.1},{:.1},{:.1},{:.2}",
             cfg.sweep,
+            data_name(data),
             cfg.n,
             cfg.d,
             cfg.m,
@@ -244,15 +333,23 @@ fn run(cfg: &Config) {
 
 fn main() {
     let preset = std::env::args().nth(1).unwrap_or_else(|| "smoke".to_string());
+    let data = match std::env::args().nth(2).as_deref() {
+        None | Some("clustered") => Data::Clustered,
+        Some("uniform") => Data::Uniform,
+        Some(other) => {
+            eprintln!("unknown data model '{other}' (expected: clustered | uniform)");
+            std::process::exit(2);
+        }
+    };
     let cfgs = presets(&preset);
     println!(
-        "sweep,n,d,m,ef_construction,ef,k,queries,build_ms,commit_ms,recall_at_k,\
+        "sweep,data,n,d,m,ef_construction,ef,k,queries,build_ms,commit_ms,recall_at_k,\
          opened_med,opened_p95,proof_bytes_med,proof_bytes_p95,\
          search_us_med,prove_us_med,verify_us_med,prove_over_search"
     );
     let t0 = Instant::now();
     for c in &cfgs {
-        run(c);
+        run(c, data);
     }
     eprintln!("done in {:.1}s", t0.elapsed().as_secs_f64());
 }
