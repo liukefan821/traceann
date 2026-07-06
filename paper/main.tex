@@ -1,0 +1,196 @@
+% TraceANN — working draft skeleton.
+% Draft in plain `article` for portability; FGCS first submission is
+% Your-Paper-Your-Way (any single PDF), so elsarticle/IEEEtran porting
+% happens only at revision time.
+%
+% Build locally:  pdflatex main && bibtex main && pdflatex main && pdflatex main
+% Overleaf:       upload paper/ AND bench/figures/, then set
+%                 \graphicspath{{figures/}} and copy the .tex tables there.
+
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage[hidelinks]{hyperref}
+\usepackage{xcolor}
+
+\graphicspath{{../bench/figures/}}
+
+\newtheorem{theorem}{Theorem}
+\newtheorem{lemma}{Lemma}
+\newtheorem{proposition}{Proposition}
+\newtheorem{definition}{Definition}
+\newcommand{\todo}[1]{\textcolor{red}{[TODO: #1]}}
+\newcommand{\sys}{TraceANN}
+
+\title{\sys{}: Succinct Always-On Integrity Verification for\\
+Graph-Based Approximate Nearest Neighbor Search}
+\author{Kefan Liu\\ Nanyang Technological University\\
+\texttt{KEFAN001@e.ntu.edu.sg}}
+\date{Working draft --- \today}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Outsourced vector search is now a core dependency of
+retrieval-augmented AI systems, yet a client has no way to tell
+whether an untrusted server actually executed the search it was paid
+for: results can be silently truncated, stale, or computed with a
+cheaper effort parameter. We present \sys{}, a system for succinct,
+always-on integrity verification of graph-based approximate nearest
+neighbor (ANN) search. \sys{} reframes correctness for approximate
+indexes as \emph{trace consistency}: the returned top-$k$ must be
+exactly the output of a canonical deterministic search over a
+Merkle-committed index --- a notion that is both achievable per query
+and sufficient to detect result tampering and service-level cheating.
+A fully deterministic HNSW engine (integer-exact arithmetic, canonical
+encodings, a total $(\mathit{dist},\mathit{id})$ order) lets one code
+path serve as both prover and verifier, yielding bit-identical digests
+across x86-64 and aarch64. On SIFT1M ($10^6$ vectors, official ground
+truth, embedded losslessly in int8), \sys{} attains recall@10 $=0.956$
+with a $622$\,KB proof per query, $325\,\mu$s proving ($8.4\times$
+plaintext search) and $2.7$\,ms client-side verification; committing
+the full index takes $0.6$\,s. The complete Rust implementation (four
+crates, $\sim$3{,}000 lines, adversarial test suite) is open source at
+\url{https://github.com/liukefan821/traceann}.
+\end{abstract}
+
+\section{Introduction}\label{sec:intro}
+% DRAFT NOTES — write in this order:
+% p1: RAG / vector DBs outsourced; the trust gap (tamper / skimp / stale).
+% p2: why existing answers fall short — exact-kNN ADS die of the curse of
+%     dimensionality; zk pipelines (audit-on-demand) cost too much to run
+%     per query; Merkle-replay for graph indexes exists (ANNProof) but its
+%     VO carries raw vectors and its determinism story is unaddressed.
+% p3: our reframing — trace consistency (verify the execution, not the
+%     optimum); why that is the right notion for *approximate* search.
+% p4: what it takes — a bit-deterministic engine; one engine, two views;
+%     tight proofs (opened == touched).
+% p5: results teaser (SIFT1M numbers) + open source.
+
+Contributions:
+\begin{itemize}
+  \item \textbf{C1 --- Trace consistency.} A per-query soundness notion
+  for verifiable \emph{approximate} search that binds the answer to the
+  canonical execution on the committed index, sidestepping the
+  impossibility of cheap true-top-$k$ verification
+  (\S\ref{sec:security}).
+  \item \textbf{C2 --- A replayable ANN engine.} A fully deterministic
+  HNSW: integer-exact distances, canonical adjacency encodings,
+  hash-derived level assignment, and a total
+  $(\mathit{dist},\mathit{id})$ order --- bit-identical rebuilds and
+  digests across x86-64 and aarch64 (\S\ref{sec:design}).
+  \item \textbf{C3 --- \sys{}.} An open-source Rust system in which the
+  \emph{same} search engine, generic over an index view, serves prover
+  and verifier; proofs are Merkle multiproofs over exactly the touched
+  set, enforced by a used-equals-opened check (\S\ref{sec:design},
+  \S\ref{sec:impl}).
+  \item \textbf{C4 --- Evaluation.} SIFT1M at $n{=}10^6$ against the
+  official ground truth via a lossless int8 embedding: recall@10
+  $0.956$ at $622$\,KB VO, $325\,\mu$s proving, $2.7$\,ms verification;
+  controlled synthetic sweeps isolating VO scaling in $d$, $ef$, $n$;
+  an adversarial suite in which lazy-server and tampering attacks are
+  caught by construction (\S\ref{sec:eval}).
+\end{itemize}
+
+\section{Background and Related Work}\label{sec:related}
+% DRAFT NOTES:
+% 2.1 HNSW in two paragraphs (layers, greedy + beam, heuristic edges).
+% 2.2 Verifiable outsourced queries: exact-kNN ADS (MR-tree lineage) —
+%     collapse in high d; \cite{annproof} — Merkle HNSW, per-query, but
+%     VO ∝ |touched|·d and raw vectors in the proof; VIS/guided tuples
+%     \todo{cite after lit sweep}; \cite{v3db} — zk over IVF-PQ,
+%     audit-on-demand, index family chosen for circuit-friendliness.
+% 2.3 Positioning table: {index family} × {always-on vs audit} ×
+%     {VO ∝ d?} × {dynamic} × {open source} — port from
+%     specs/related-work.md.
+
+\section{Threat Model and Problem Statement}\label{sec:model}
+% Port specs/threat-model.md: roles, adversary (tamper / skimp / forge /
+% equivocate), guarantees (integrity, completeness, tightness),
+% explicit non-goals (privacy, index quality, availability, freshness).
+
+\section{Design}\label{sec:design}
+% 4.1 Deterministic engine: fixed-point arithmetic (reorder-safe integer
+%     sums → SIMD-compatible determinism); (dist,id) total order; replay
+%     rules R1–R7; hash-derived geometric level assignment (no f64::ln).
+% 4.2 Canonical commitment: unique adjacency bytes; leaf payload =
+%     adjbytes ‖ vec; domain-separated padded Merkle; δ binds all
+%     replay-relevant parameters.
+% 4.3 Proof protocol: RecordingView → touched set → multiproof with
+%     shared-path dedup; strict decoding; position↔identity binding.
+% 4.4 One engine, two views: IndexView trait; behavioral equality is
+%     structural. Figure: protocol diagram. \todo{draw protocol figure}
+
+\section{Security Analysis}\label{sec:security}
+% Port specs/soundness.md verbatim structure:
+\begin{definition}[Trace consistency]
+\todo{port from specs/soundness.md \S1--\S3}
+\end{definition}
+\begin{lemma}[Merkle binding] \todo{port} \end{lemma}
+\begin{lemma}[Locality] \todo{port} \end{lemma}
+\begin{theorem}[Soundness]
+For every PPT adversary $\mathcal{A}$,
+$\Pr[\mathsf{Verify}(\delta,q,k,\mathit{ef},\pi)=1 \wedge
+\pi.\mathsf{result} \neq S(I,q,k,\mathit{ef})] \le
+\mathsf{Adv}^{\mathrm{CR}}_{\mathrm{blake3}}(\mathcal{B})$.
+\end{theorem}
+% + Completeness, Tightness propositions, and the scope discussion
+% ("execution, not optimum") — reviewers' first objection, answered
+% before they raise it.
+
+\section{Implementation}\label{sec:impl}
+% Rust workspace, 4 crates, 3,032 LOC, 42 tests incl. adversarial suite;
+% zero-GPU; blake3; per-crate table (ta-core 1,303 / ta-commit 671 /
+% ta-proof 477 / ta-bench 581). Cross-platform golden-digest test.
+% Debug-build prover self-verification as an engineering guardrail.
+
+\section{Evaluation}\label{sec:eval}
+% 7.1 Setup: hardware; methodology (min-of-3, median/p95); synthetic
+%     data model + the four observed failure modes that shaped it
+%     (distance concentration; uniform intra-cluster; islands when
+%     cluster ≥ ef_c; centroid concentration) — from bench/README.md.
+% 7.2 SIFT1M headline (lossless int8 shift; official GT):
+\begin{table}[t]\centering
+\caption{SIFT1M ($n{=}10^6$, $d{=}128$, $m{=}16$,
+$\mathit{ef}_c{=}200$): recall vs.\ official ground truth and
+verification costs.}\label{tab:sift}
+\input{../bench/figures/table2_sift.tex}
+\end{table}
+\begin{figure}[t]\centering
+\includegraphics[width=\linewidth]{fig4_sift1m.pdf}
+\caption{SIFT1M: VO size along the recall Pareto frontier (left) and
+search/prove/verify latencies (right).}\label{fig:sift}
+\end{figure}
+% 7.3 Controlled sweeps:
+\begin{figure}[t]\centering
+\includegraphics[width=\linewidth]{fig1_vo_vs_d.pdf}
+\caption{Fixed intrinsic dimension, varying ambient $d$: VO grows with
+the payload term while opened leaves do not.}\label{fig:d}
+\end{figure}
+\begin{table}[t]\centering
+\caption{Ambient-dimension sweep ($n{=}50$k, $\mathit{ef}{=}64$).}
+\label{tab:d}
+\input{../bench/figures/table1_d_sweep.tex}
+\end{table}
+% + fig2 (ef sweep incl. recall panel), fig3 (n sweep, log-x),
+%   commit throughput (0.59 s for 10^6 leaves), build cost (307 s).
+% 7.4 Attack detection: table mapping attacks → rejecting stage/error
+%     (from the ta-proof adversarial suite).
+
+\section{Discussion and Future Work}\label{sec:discussion}
+% Tier-2: replace raw vectors in leaves with Pedersen commitments +
+% one aggregated inner-product argument → VO sublinear in d (the d
+% sweep is the motivation); journaled epochs for dynamic updates and
+% freshness; verifiable filtered search; SIMD distance kernels
+% (reorder-safe by integer associativity).
+
+\section{Conclusion}\label{sec:conclusion}
+% Three sentences. Write last.
+
+\bibliographystyle{plain}
+\bibliography{refs}
+
+\end{document}
