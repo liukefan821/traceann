@@ -58,17 +58,105 @@ crates, $\sim$3{,}000 lines, adversarial test suite) is open source at
 \end{abstract}
 
 \section{Introduction}\label{sec:intro}
-% DRAFT NOTES — write in this order:
-% p1: RAG / vector DBs outsourced; the trust gap (tamper / skimp / stale).
-% p2: why existing answers fall short — exact-kNN ADS die of the curse of
-%     dimensionality; zk pipelines (audit-on-demand) cost too much to run
-%     per query; Merkle-replay for graph indexes exists (ANNProof) but its
-%     VO carries raw vectors and its determinism story is unaddressed.
-% p3: our reframing — trace consistency (verify the execution, not the
-%     optimum); why that is the right notion for *approximate* search.
-% p4: what it takes — a bit-deterministic engine; one engine, two views;
-%     tight proofs (opened == touched).
-% p5: results teaser (SIFT1M numbers) + open source.
+
+Approximate nearest neighbor (ANN) search over high-dimensional
+embeddings has become basic infrastructure: it is the retrieval stage of
+retrieval-augmented generation, semantic search, and recommendation, and
+it is increasingly consumed as a managed service. Because an index over
+hundreds of millions of embeddings is costly to build and to host,
+clients outsource both storage and query execution to a vector-search
+provider and receive, for each query embedding, only a top-$k$ list of
+identifiers. That list arrives with no evidence of how it was produced.
+A provider that is overloaded, cost-cutting, or actively malicious can
+truncate the search with a smaller effort parameter, serve results from
+a stale index version, or silently drop and substitute entries; every
+one of these yields a top-$k$ list that looks entirely plausible,
+because the index is approximate and near-misses are expected. In a
+retrieval-augmented pipeline the manipulated list is fed directly to a
+language model, so a retrieval-integrity failure propagates into the
+generated answer. The question we address is how a client can check,
+cheaply and on \emph{every} query, that the returned top-$k$ is what the
+agreed algorithm over the agreed data would return.
+
+Existing answers each surrender one of these requirements. Authenticated
+data structures for \emph{exact} nearest-neighbor queries
+\cite{papadopoulos2011} certify the true neighbors, but they rest on
+low-dimensional spatial partitioning and degrade with the curse of
+dimensionality --- precisely the high-dimensional regime where ANN is
+used --- and certifying the exact top-$k$ of an approximate index is
+either meaningless or as costly as exact search. Recent cryptographic
+pipelines prove, in zero knowledge, that a returned list matches a
+fixed-shape query semantics on a committed snapshot \cite{v3db2026},
+optionally hiding the query and the index \cite{veriann2026}; these are
+elegant and privacy-preserving, but their proving cost confines them to
+\emph{audit-on-demand} use rather than per-query attachment, and they
+standardize on IVF-PQ or LSH pipelines chosen for circuit- or
+protocol-friendliness rather than the graph indexes that dominate
+high-recall ANN. Closest to our setting, Merkle-based schemes replay an
+HNSW \cite{malkov2018hnsw} search per query against an authenticated
+index \cite{annproof2024,vis2024}: this is always-on and graph-native,
+but the verification object embeds the raw $d$-dimensional vector of
+every touched node, so its size grows with the ambient dimension, and
+--- more fundamentally --- the determinism of the ``canonical'' search
+the client is meant to re-check is left unspecified, leaving
+floating-point distance evaluation, tie-breaking, and platform-dependent
+ordering free to diverge. In short, the field forces a choice between
+cheap-but-nondeterministic graph replay and heavy-but-private non-graph
+proofs; no prior system delivers always-on, low-cost integrity for
+graph-based ANN over a reference execution that is pinned down
+bit-for-bit.
+
+Our starting point is that the obstacle is partly a matter of
+definition. Demanding the true $k$ nearest neighbors is the wrong
+correctness target for an index that is deliberately approximate. \sys{}
+instead adopts \emph{trace consistency}: the returned top-$k$ must be
+exactly the output of a single canonical, deterministic search executed
+over the Merkle-committed index --- not the right answer in an absolute
+sense, but the answer the agreed algorithm on the agreed data produces,
+bit-for-bit. This is the right notion for approximate search on two
+counts. It is achievable per query at low cost, because the client
+re-runs the search over only the data the server was forced to reveal;
+and it is sufficient to catch the failures that matter, since a
+truncated traversal, an understated effort parameter, a stale index, or
+a dropped or substituted result each induces an execution that diverges
+from the canonical one and is rejected. Retrieval \emph{quality} thereby
+becomes a property of the committed index and its published parameters
+--- auditable once, up front --- while retrieval \emph{integrity} is
+enforced on every query.
+
+Trace consistency is only as strong as the claim that the canonical
+execution is genuinely canonical, which we secure with three
+ingredients. First, a fully deterministic HNSW engine: integer-exact
+distances whose reordering-invariant integer sums admit SIMD and
+parallel evaluation without changing a bit, a total
+$(\mathit{dist},\mathit{id})$ order that breaks every tie
+deterministically, hash-derived level assignment in place of a
+floating-point logarithm, and canonical adjacency encodings --- so that
+rebuilding the index and re-running any query produce bit-identical
+digests across x86-64 and aarch64. Second, one engine behind two views:
+the same search code, generic over an index-view interface, drives both
+the prover, over the full index, and the verifier, over the partial view
+reconstructed from the proof, so prover--verifier agreement is
+structural rather than a second implementation kept in sync. Third,
+tight proofs: the proof is a Merkle multiproof over exactly the set of
+nodes the search touched, and the verifier enforces a used-equals-opened
+invariant --- the replay may read no node the server did not open, and
+the server may open no node the replay does not read --- which makes the
+proof precisely the search's data footprint and closes both omission and
+padding. The resulting soundness argument reduces any transcript that
+verifies yet deviates from the canonical output to a collision of the
+underlying hash (\S\ref{sec:security}).
+
+On SIFT1M ($10^6$ vectors, official ground truth, embedded losslessly
+into int8), \sys{} attains recall@10 $=0.956$ with a $622$\,KB proof per
+query, $325\,\mu$s proving ($8.4\times$ a plaintext search), and
+$2.7$\,ms client-side verification, while committing the full index
+takes $0.6$\,s. Controlled synthetic sweeps isolate how the proof scales
+in $d$, $\mathit{ef}$, and $n$, and an adversarial test suite exhibits
+lazy-server and tampering attacks being rejected by construction. The
+complete system is an open-source Rust workspace of roughly $3{,}000$
+lines across four crates with a single external dependency, at
+\url{https://github.com/liukefan821/traceann}.
 
 Contributions:
 \begin{itemize}
