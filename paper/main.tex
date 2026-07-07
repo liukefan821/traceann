@@ -184,16 +184,126 @@ Contributions:
 \end{itemize}
 
 \section{Background and Related Work}\label{sec:related}
-% DRAFT NOTES:
-% 2.1 HNSW in two paragraphs (layers, greedy + beam, heuristic edges).
-% 2.2 Verifiable outsourced queries: exact-kNN ADS (MR-tree lineage) —
-%     collapse in high d; \cite{annproof} — Merkle HNSW, per-query, but
-%     VO ∝ |touched|·d and raw vectors in the proof; VIS/guided tuples
-%     \todo{cite after lit sweep}; \cite{v3db} — zk over IVF-PQ,
-%     audit-on-demand, index family chosen for circuit-friendliness.
-% 2.3 Positioning table: {index family} × {always-on vs audit} ×
-%     {VO ∝ d?} × {dynamic} × {open source} — port from
-%     specs/related-work.md.
+
+\subsection{Graph-based ANN and HNSW}
+
+Modern high-recall ANN is dominated by proximity-graph indexes, of which
+the Hierarchical Navigable Small World graph (HNSW)
+\cite{malkov2018hnsw} is the de facto standard. HNSW organizes the
+dataset into a stack of layers: every element occupies layer $0$ and,
+with geometrically decreasing probability, a random number of the layers
+above, so upper layers hold sparse long-range links and lower layers
+dense short-range ones. Within each layer an element keeps edges to a
+bounded number of near neighbors; construction selects these edges with
+a diversity heuristic that prunes redundant candidates rather than
+simply retaining the closest, which is what keeps the graph navigable at
+query time.
+
+A query is answered in two phases. From a fixed entry point in the top
+layer, a greedy descent repeatedly hops to the neighbor closest to the
+query until none improves, then drops one layer using that node as the
+new entry. At layer $0$ the search switches to a best-first beam of
+width $\mathit{ef}$ (the effort parameter): it expands the closest
+unvisited candidate, folds in its neighbors, and halts when the beam can
+no longer improve, returning the $k$ closest elements seen. Recall is
+tuned by $\mathit{ef}$ and the construction degree, trading traversal
+work for accuracy. Two aspects of the standard algorithm matter for
+verification: level assignment is randomized, and distances are
+floating-point with implementation-defined tie-breaking among
+equidistant candidates --- so two nominally identical runs need not
+agree bit-for-bit, a point we take up in \S\ref{sec:design}.
+
+\subsection{Verifiable outsourced queries}
+
+Authenticating outsourced nearest-neighbor queries has a long lineage in
+spatial databases. Merkle-signed spatial partitions (the MR-tree family)
+and Voronoi-based schemes let a client verify the correctness and
+completeness of \emph{exact} $k$-nearest-neighbor results returned by an
+untrusted server \cite{papadopoulos2011}. The guarantees are strong but
+bound to low-dimensional geometry: partition- and boundary-based
+authenticated data structures degrade toward a linear scan as the
+dimension grows, precisely the high-dimensional embedding regime in
+which ANN is deployed. And for an index that is approximate by design,
+certifying the exact top-$k$ is the wrong target --- either unattainable
+without exact search or vacuous --- which motivates authenticating the
+approximate computation itself rather than an absolute ground truth.
+
+The line closest to ours authenticates a graph traversal per query.
+ANNProof \cite{annproof2024} pairs a Merkle HNSW node tree with a Merkle
+vector-identifier tree and, anchored by on-chain smart contracts for
+tamper-evidence, lets the client replay the HNSW search and check the
+returned neighbors, using a Merkle sharding tree to keep index updates
+cheap. VIS \cite{vis2024} builds a verifiable index structure from
+\emph{guided tuples} that trims the transmission and computation cost of
+the verification object. Both are always-on --- a proof accompanies
+every query --- and operate natively on the graph index that high-recall
+ANN actually uses. Two gaps motivate \sys{}. First, their verification
+object embeds the raw $d$-dimensional vector of every touched node, so
+its size scales with the ambient dimension. Second, and more
+fundamentally, the determinism of the canonical search the client
+re-executes is left unspecified: floating-point distance evaluation,
+tie-breaking among equidistant candidates, and platform-dependent
+ordering are each free to diverge, so the reference execution being
+checked is not pinned down. \sys{} keeps the always-on graph-replay
+model while making the reference execution bit-exact and cross-platform
+reproducible (\S\ref{sec:design}), proving trace consistency by explicit
+reduction to a hash collision (\S\ref{sec:security}), and treating
+sublinear-in-$d$ proofs as a commitment-level upgrade
+(\S\ref{sec:discussion}).
+
+A cryptographically heavier and concurrent line proves retrieval
+correctness in zero knowledge. V3DB \cite{v3db2026} standardizes an
+IVF-PQ pipeline into a fixed-shape query semantics and, when challenged,
+emits a succinct SNARK that the returned list is exactly the output of
+that semantics on a committed snapshot, hiding the query and private
+index state; VeriANN \cite{veriann2026} combines
+distributed-point-function PIR over LSH indexes with authenticated
+garbled circuits to add query privacy and index confidentiality under a
+two-server non-colluding model. These attain what Merkle-VO schemes
+cannot --- proofs that do not reveal the access pattern, and, for V3DB,
+cost sublinear in $d$ --- but at the mirror-image trade-off to ours:
+proving is expensive enough to be \emph{audit-on-demand} rather than
+attached to every query, and both standardize on IVF-PQ or LSH pipelines
+chosen for circuit- or protocol-friendliness rather than the graph
+traversal that dominates high-recall ANN. \sys{} takes the complementary
+position --- always-on, single-server, microsecond-cost Merkle proofs
+over a graph index --- accepting access-pattern disclosure as an
+explicit non-goal (\S\ref{sec:model}).
+
+\subsection{Summary and positioning}
+
+Table~\ref{tab:related} places these systems on the coordinates that
+matter for our setting. No prior system occupies graph-native,
+always-on, and sublinear-in-$d$ verification at once: the always-on
+graph schemes carry $d$-linear proofs, the sublinear-in-$d$ scheme is a
+non-graph index verified only on demand, and the private scheme abandons
+both the single-server model and the graph. \sys{} is designed for all
+three, with sublinearity in $d$ deferred to the Tier-2 commitment
+(\S\ref{sec:discussion}).
+
+\begin{table}[t]\centering\footnotesize
+\setlength{\tabcolsep}{5pt}
+\caption{Verifiable and authenticated ANN systems on the coordinates
+relevant to \sys{}. ``Proof vs.\ $d$'' is whether the per-query proof
+grows with the ambient dimension: V3DB's sublinearity comes from its
+zero-knowledge circuit, VeriANN's transcript is a garbled-circuit
+exchange rather than a verification object, and \sys{}'s Tier-2
+commitment (\S\ref{sec:discussion}) targets sublinearity. No prior
+system is graph-native \emph{and} always-on \emph{and} sublinear in
+$d$.}\label{tab:related}
+\begin{tabular}{@{}llllll@{}}
+\toprule
+System & Venue & Index & Mode & Proof vs.\ $d$ & Trust \\
+\midrule
+ANNProof \cite{annproof2024} & FGCS'24   & HNSW   & always-on & $\propto d$          & 1-server \\
+VIS \cite{vis2024}           & ADMA'24   & graph  & always-on & $\propto d$          & 1-server \\
+V3DB \cite{v3db2026}         & arXiv'26  & IVF-PQ & on-demand & sublinear           & 1-server \\
+VeriANN \cite{veriann2026}   & ePrint'26 & LSH    & always-on & n/a                 & 2-server \\
+\midrule
+\textbf{\sys{}}              & (ours)    & HNSW   & always-on & $\propto d \to$ sub. & 1-server \\
+\bottomrule
+\end{tabular}
+\end{table}
 
 \section{Threat Model and Problem Statement}\label{sec:model}
 % Port specs/threat-model.md: roles, adversary (tamper / skimp / forge /
