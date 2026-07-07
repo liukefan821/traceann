@@ -40,7 +40,12 @@ no PPT adversary can produce, for the same `(root, n, position)`, two
 distinct payloads whose openings both verify, except with negligible
 probability. Domain separation (`0x00` leaf / `0x01` node / `0x02`
 empty prefixes) excludes cross-domain second preimages; the verifier
-derives the expected proof depth from `n`, excluding shape confusion.
+derives the expected proof depth from `n`, excluding shape
+confusion. Padding positions `≥ n` — the power-of-two, `0x02`-domain
+empty leaves — cannot be opened as real nodes: Stage (3) requires
+`position ∈ [0, n)` via `decoded.id = position`, and an empty leaf's
+hash lies in a domain disjoint from every `H_leaf`, so no padding slot
+yields a verifying data opening.
 
 **Lemma 2 (Locality).** The execution of `S(I, q, k, ef)` reads a
 well-defined *touched set* `T(I, q, k, ef) ⊆ [n]` — the ids whose
@@ -88,6 +93,16 @@ decoding with the position↔identity check `decoded.id = position`;
 openings, aborting on any access outside it; (5) bit-exact equality of
 the replayed list with `π.result`; (6) tightness: the replay's touched
 set equals the opened set.
+
+The query parameters `(q, k, ef)` are client inputs to `Verify`, not
+fields of `π`: the server commits `δ` first and then answers whatever
+query the client issues, so it cannot understate `ef`. Stage (4)
+replays at beam `ef.max(k).max(1)` (R7) with the client's `ef`; a
+server that searched at a smaller effective beam opened fewer leaves,
+so the honest-`ef` replay reaches a node it never opened and aborts
+(`MissingNode`). The lazy-`ef` guarantee is therefore not circular —
+`ef` is pinned by the client, echoed into the replay, and `T` is taken
+at that `ef`.
 
 ## 4. Theorem
 
@@ -167,3 +182,12 @@ gameable by the server in either direction.
 - **Adaptive queries add nothing.** δ is fixed before queries; each
   verification is stateless and per-query, so the bound is preserved
   under any adaptive strategy by a union bound over queries.
+- **Sublinear in which resource.** "Succinct" refers to *proof size*
+  in `n`: `|VO| = Θ(|T| · (payload + amortized path))` with `|T| ≪ n`
+  (Prop 2) — the proof tracks the search's data footprint, not the
+  index. Dependence on `d` is *linear* at Tier-1 (each opened payload
+  carries a raw `d`-vector) and is the target of the Tier-2 aggregated
+  IPA. Verifier *time* is `O(|T| · deg · dim + |VO| · hash)`; verifier
+  *working memory* is `O(n)` for the `n`-bit visited bitmap in
+  `search_layer` (~125 KB at `n = 10^6`, not `n` payloads). We headline
+  `|VO|` and never claim sublinear verifier space.
