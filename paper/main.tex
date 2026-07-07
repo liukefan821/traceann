@@ -306,9 +306,87 @@ VeriANN \cite{veriann2026}   & ePrint'26 & LSH    & always-on & n/a             
 \end{table}
 
 \section{Threat Model and Problem Statement}\label{sec:model}
-% Port specs/threat-model.md: roles, adversary (tamper / skimp / forge /
-% equivocate), guarantees (integrity, completeness, tightness),
-% explicit non-goals (privacy, index quality, availability, freshness).
+
+\subsection{Setting and roles}
+
+We consider outsourced vector search among three roles, the first two of
+which may coincide. An \emph{owner} builds an HNSW index over a corpus
+of quantized vectors, computes a commitment, and publishes a compact
+digest $\delta$. An untrusted \emph{server} stores the index and answers
+each query $(q, k, \mathit{ef})$ with a top-$k$ result and a proof
+$\pi$. An honest \emph{client}, or verifier, holds only $\delta$ --- on
+the order of a hundred bytes: the Merkle root, the leaf count $n$, the
+entry identifier, the maximum level, the degree caps $m$ and $m_0$, the
+dimension, and a metric tag --- together with its own query parameters.
+We assume $\delta$ reaches the client authentically, through a signed
+release, a pinned configuration, or an on-chain anchor; how $\delta$ is
+distributed is out of band and out of scope.
+
+\subsection{Adversary}
+
+We model the server as a malicious, computationally bounded adversary
+with full control over its storage, computation, and network responses,
+acting adaptively across queries. Its capabilities are:
+
+\begin{itemize}
+\item \emph{Tamper} --- answer from a modified copy of the index:
+  altered vectors, edges, or entry point.
+\item \emph{Skimp} --- run a cheaper search than requested (a smaller
+  $\mathit{ef}$, a wrong entry, a truncated traversal) while charging
+  for the full one, i.e.\ service-level cheating.
+\item \emph{Forge} --- return fabricated results or openings, padded or
+  truncated proofs, or a proof generated against a different index.
+\item \emph{Equivocate within a proof} --- open a leaf at position $i$
+  whose decoded identity is $j \neq i$.
+\end{itemize}
+
+\subsection{Guarantees}
+
+Against this adversary, \sys{} provides three guarantees, made precise
+in \S\ref{sec:security}:
+
+\begin{itemize}
+\item \emph{Per-query integrity (trace consistency).} If the verifier
+  accepts, the returned $(\mathit{distance},\mathit{id})$ list is
+  exactly the output of the canonical deterministic search with
+  parameters $(q, k, \mathit{ef})$ over the index committed by $\delta$,
+  except with probability bounded by the collision advantage against the
+  underlying hash (Theorem~\ref{thm:soundness}).
+\item \emph{Completeness.} An honest server's proof always verifies.
+\item \emph{Tightness.} An accepted proof opens exactly the set of nodes
+  the search touches --- no padding (\texttt{UnusedOpenings}) and no
+  omission (\texttt{MissingNode}) --- so the proof size equals the
+  search's data footprint.
+\end{itemize}
+
+\subsection{Non-goals}
+
+\sys{} deliberately does not provide:
+
+\begin{itemize}
+\item \emph{Confidentiality.} Queries, vectors, and graph structure are
+  in the clear; the protocol proves integrity only. Zero-knowledge audit
+  systems instead trade orders-of-magnitude higher prover cost for
+  hiding.
+\item \emph{Index quality.} The server commits whatever index it
+  chooses; the guarantee is consistency with \emph{that} commitment and
+  its declared parameters. Accuracy is conveyed by the committed
+  parameters ($m$, $m_0$, metric) and the published recall behavior of
+  the construction, not by the proof.
+\item \emph{Availability.} A server may refuse to answer; refusal is
+  trivially detected and is a contractual, not cryptographic, matter.
+\item \emph{Freshness across re-commitments.} The current system
+  verifies against a single committed snapshot; journaled epochs with a
+  signed root chain are designed but not yet part of the verified
+  surface (\S\ref{sec:discussion}).
+\end{itemize}
+
+Beyond the authentic delivery of $\delta$, the guarantees rest on
+standard cryptographic and determinism assumptions --- collision
+resistance of the hash, a verifier that replays the very engine defining
+the canonical search, and integer-exact arithmetic that makes replay
+bit-identical across architectures --- stated as (A1)--(A3) in
+\S\ref{sec:security}.
 
 \section{Design}\label{sec:design}
 % 4.1 Deterministic engine: fixed-point arithmetic (reorder-safe integer
@@ -331,6 +409,7 @@ VeriANN \cite{veriann2026}   & ePrint'26 & LSH    & always-on & n/a             
 \begin{lemma}[Locality] \todo{port} \end{lemma}
 \begin{lemma}[Replay coincidence] \todo{port} \end{lemma}
 \begin{theorem}[Soundness]
+\label{thm:soundness}
 For every PPT adversary $\mathcal{A}$,
 $\Pr[\mathsf{Verify}(\delta,q,k,\mathit{ef},\pi)=1 \wedge
 \pi.\mathsf{result} \neq S(I,q,k,\mathit{ef})] \le
