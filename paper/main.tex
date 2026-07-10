@@ -389,16 +389,122 @@ bit-identical across architectures --- stated as (A1)--(A3) in
 \S\ref{sec:security}.
 
 \section{Design}\label{sec:design}
-% 4.1 Deterministic engine: fixed-point arithmetic (reorder-safe integer
-%     sums → SIMD-compatible determinism); (dist,id) total order; replay
-%     rules R1–R7; hash-derived geometric level assignment (no f64::ln).
-% 4.2 Canonical commitment: unique adjacency bytes; leaf payload =
-%     adjbytes ‖ vec; domain-separated padded Merkle; δ binds all
-%     replay-relevant parameters.
-% 4.3 Proof protocol: RecordingView → touched set → multiproof with
-%     shared-path dedup; strict decoding; position↔identity binding.
-% 4.4 One engine, two views: IndexView trait; behavioral equality is
-%     structural. Figure: protocol diagram. \todo{draw protocol figure}
+
+\subsection{A deterministic search engine}
+
+Trace-consistency verification requires the client to reproduce the
+server's traversal exactly, so every quantity the traversal branches on
+must be reproducible bit-for-bit across machines. The usual sources of
+nondeterminism in HNSW --- floating-point distance evaluation,
+tie-breaking among equal distances, and randomized level assignment ---
+are each removed. Distances are computed on int8-quantized vectors with
+$64$-bit integer accumulation: the Euclidean metric uses $\lVert
+a-b\rVert^2=\sum_i (a_i-b_i)^2$ and inner product the negated dot
+product $-\langle a,b\rangle$, so a single ``smaller is better''
+convention orders the whole engine. Integer addition is associative and
+commutative, so a SIMD or multi-threaded kernel may reorder the
+accumulation freely without changing the result --- the property
+floating point lacks. With int8 components a dot product over even
+$d=4096$ dimensions stays well below $2^{27}$ in magnitude, far inside
+the $64$-bit range, so no overflow arises. Quantization itself,
+$q_i=\operatorname{round}(x_i/\mathit{scale})$ clamped to $[-127,127]$,
+happens once at build time under a single committed $\mathit{scale}$ and
+is therefore outside the replay path.
+
+Two further choices complete determinism. First, every comparison in the
+traversal --- neighbor expansion, beam admission, result truncation ---
+orders candidates by the lexicographic tuple
+$(\mathit{dist},\mathit{id})$, so ties in distance are broken
+deterministically by identifier and the returned list has exactly one
+legal order. Second, a node's level is assigned by counting consecutive
+successes of a Bernoulli$(1/m)$ trial drawn from a \texttt{splitmix64}
+chain seeded by the pair $(\mathit{seed},\mathit{id})$, reproducing the
+textbook geometric law $\Pr[\mathrm{level}\ge\ell]=m^{-\ell}$ without
+evaluating a floating-point logarithm. The consequence, which we test as
+a release gate, is that rebuilding an index and re-running any query
+yield byte-identical commitments and results on x86-64 Linux and aarch64
+macOS alike; a single golden-digest divergence across architectures
+would flag a determinism regression.
+
+\subsection{A canonical commitment}
+
+The commitment must bind not just the vectors but the exact graph the
+traversal walks, and it must admit only one interpretation. Each node is
+serialized to a canonical payload
+$\mathrm{adjbytes}(i)\,\|\,\mathrm{vecbytes}(i)$. The adjacency bytes
+encode the identifier, the level, and then, per layer, a count followed
+by the strictly ascending neighbor identifiers, all little-endian; the
+vector bytes are the raw int8 components. Because the identifier is the
+first field of every payload, two nodes with identical vectors still
+commit to distinct leaves, so an opening for node $i$ can never verify
+against node $j$'s content --- the property the security proof invokes
+as identity binding. The encoding is self-delimiting and $\mathit{dim}$
+is fixed by the digest, so the concatenation parses uniquely; the
+verifier's decoder consumes the byte string exactly, rejecting any
+payload with a missing or trailing byte, which makes the leaf format
+non-malleable.
+
+Leaves are hashed with domain separation --- a leaf hashes the byte
+\texttt{0x00} before its payload, an internal node the byte
+\texttt{0x01} before its two child hashes, and padding leaves a distinct
+\texttt{0x02}-domain constant --- and combined into a
+power-of-two-padded Merkle tree whose depth is fixed by the real leaf
+count $n$. Padding therefore lives in a hash domain disjoint from data
+and can never be opened as a node. The digest $\delta$ binds everything
+the replay depends on: the root, the real leaf count, the entry point,
+the maximum level, the degree caps $m$ and $m_0$, the dimension, and the
+metric, under a versioned domain string; a client may pin the full
+structure or its $32$-byte checksum. Omitting any of these fields would
+let a server answer against a different index shape than the one the
+client pinned. The same Merkle machinery is reused unchanged by the
+succinct tier, which only replaces the raw vector in each payload with a
+constant-size commitment (\S\ref{sec:discussion}).
+
+\subsection{The proof protocol}
+
+To answer a query the server runs the engine over the full index wrapped
+in a \emph{recording} view that logs every identifier whose level,
+adjacency, or vector is read. The recorded set --- returned in ascending
+order --- is exactly the touched set of Lemma~\ref{lem:locality}. The
+server then opens precisely those leaves with a single batched Merkle
+multiproof that deduplicates the internal-node siblings shared by nearby
+leaves, and packages the claimed result, the opened payloads, and the
+multiproof as the query proof. Opening the touched set and nothing more
+is what makes the proof track the search's data footprint rather than
+the index (Proposition~\ref{prop:tight}).
+
+The client verifies in six stages. It (1) checks the dimension and the
+empty-index conventions; (2) verifies the batched multiproof against the
+committed root and leaf count, binding every opened payload to $\delta$;
+(3) decodes each payload strictly and checks that its decoded identifier
+equals the position it was opened at, rejecting any mismatch; (4)
+rebuilds a partial view from the decoded nodes and \emph{replays the
+same engine} over it, aborting the instant the traversal reads an
+identifier the server did not open; (5) checks that the replayed result
+equals the claimed result bit-for-bit; and (6) checks that the set the
+replay touched equals the set that was opened, rejecting unused
+openings. Stages~(4)--(6) are exactly the hypotheses the soundness
+argument discharges: a completed replay forces the opened view to
+coincide with the reference execution, and bit-exact equality then pins
+the result (\S\ref{sec:security}).
+
+\subsection{One engine, two views}
+
+The prover and the verifier run \emph{the same} search procedure. Node
+data is reached only through a narrow view interface exposing level,
+adjacency, and vector lookups, each of which may report a missing
+identifier; the search function is generic over that interface. The
+server drives it with a full-index view, the client with the partial
+view reconstructed from the proof, and the recording view that both
+sides use is itself a view wrapping another. Because there is one
+implementation rather than a reference specification and a separate
+re-implementation, prover--verifier behavioral equality is structural:
+any change to the traversal changes both sides at once, and there is no
+second engine to drift out of sync. This is the assumption the soundness
+bound rests on (A2 in \S\ref{sec:security}), discharged by construction
+rather than by testing.
+
+\todo{protocol-flow figure: commit, recorded search, multiproof, replay}
 
 \section{Security Analysis}\label{sec:security}
 
