@@ -401,23 +401,237 @@ bit-identical across architectures --- stated as (A1)--(A3) in
 %     structural. Figure: protocol diagram. \todo{draw protocol figure}
 
 \section{Security Analysis}\label{sec:security}
-% Port specs/soundness.md verbatim structure:
-\begin{definition}[Trace consistency]
-\todo{port from specs/soundness.md \S1--\S3}
+
+\subsection{Objects and notation}
+
+An index $I=(G,X)$ is committed together with its parameters
+$P=(n,e^*,L,m,m_0,\mathit{dim},\mathit{metric})$. Here $G$ is a layered
+graph over ids $[n]=\{0,\dots,n-1\}$: node $i$ exists on layers $0$
+through $\mathrm{level}(i)$, its per-layer adjacency lists are canonical
+(strictly ascending ids, no self-loops, degree at most $m_0$ at
+layer~$0$ and $m$ above), and an edge at layer~$\ell$ points only to
+nodes present at $\ell$. The map $X:[n]\to\mathbb{Z}_{8}^{\mathit{dim}}$
+gives the quantized (int8) vectors, and $e^*$ is the entry point --- the
+highest-level node, ties broken to the smallest id --- at level $L$.
+
+Each node has a canonical payload
+$\mathit{payload}_i=\mathrm{adjbytes}(i)\,\|\,\mathrm{vecbytes}(i)$, a
+byte string with exactly one parse and, because the id is embedded in
+$\mathrm{adjbytes}(i)$, distinct across nodes. The commitment is
+$\delta=\mathsf{Commit}(I)=(\mathit{root},P)$, where $\mathit{root}$ is
+the domain-separated, power-of-two-padded Merkle root over
+$H_{\mathrm{leaf}}(\mathit{payload}_0),\dots,H_{\mathrm{leaf}}(\mathit{payload}_{n-1})$.
+
+The reference computation is the deterministic search
+$S(I,q,k,\mathit{ef})$: a greedy descent on layers $L$ down to $1$, a
+best-first beam of width $\max(\mathit{ef},k,1)$ at layer~$0$, and
+truncation to the $k$ closest. Every ordering is on the tuple
+$(\mathit{dist},\mathit{id})$ and every distance is integer-exact, so
+$S$ is a total function of its arguments --- no randomness, no platform
+dependence.
+
+\begin{definition}[Trace consistency]\label{def:tc}
+
+Fix an index $I$ and its commitment $\delta=\mathsf{Commit}(I)$. A
+verifier is \emph{trace-consistent} if accepting a transcript for a
+query $(q,k,\mathit{ef})$ implies that the certified result equals
+$S(I,q,k,\mathit{ef})$, the output of the canonical search on the
+committed index. \sys{} achieves this computationally: the implication
+fails only with the collision-finding advantage of
+Theorem~\ref{thm:soundness}.
+
 \end{definition}
-\begin{lemma}[Merkle binding] \todo{port} \end{lemma}
-\begin{lemma}[Locality] \todo{port} \end{lemma}
-\begin{lemma}[Replay coincidence] \todo{port} \end{lemma}
-\begin{theorem}[Soundness]
-\label{thm:soundness}
-For every PPT adversary $\mathcal{A}$,
-$\Pr[\mathsf{Verify}(\delta,q,k,\mathit{ef},\pi)=1 \wedge
-\pi.\mathsf{result} \neq S(I,q,k,\mathit{ef})] \le
-\mathsf{Adv}^{\mathrm{CR}}_{\mathrm{blake3}}(\mathcal{B})$.
+
+\subsection{Building blocks}
+
+\begin{lemma}[Merkle binding]\label{lem:binding}
+
+Under collision resistance of the hash, no efficient adversary can
+produce, for one $(\mathit{root},n,\mathit{position})$, two distinct
+payloads whose openings both verify, except with negligible probability.
+Domain separation (\texttt{0x00} leaf, \texttt{0x01} node, \texttt{0x02}
+empty prefixes) rules out cross-domain second preimages, and the
+verifier derives the expected proof depth from $n$, excluding shape
+confusion. Padding positions $\ge n$ --- the power-of-two,
+\texttt{0x02}-domain empty leaves --- cannot be opened as real nodes:
+acceptance requires $\mathit{position}\in[0,n)$ through the
+\texttt{decoded.id}${=}$\texttt{position} check, and an empty leaf's
+hash lies in a domain disjoint from every $H_{\mathrm{leaf}}$.
+
+\end{lemma}
+
+\begin{lemma}[Locality]\label{lem:locality}
+
+The execution of $S(I,q,k,\mathit{ef})$ reads a well-defined
+\emph{touched set} $T(I,q,k,\mathit{ef})\subseteq[n]$ --- the ids whose
+level, adjacency, or vector the engine accesses --- and the output of
+$S$ depends only on $(q,k,\mathit{ef},P)$ and the restriction $I|_T$.
+The engine reaches node data solely through an \texttt{IndexView}
+interface, and a recording view materializes $T$.
+
+\end{lemma}
+
+\begin{lemma}[Replay coincidence]\label{lem:coincidence}
+
+Let $V$ be any view over $[n]$ that agrees with $I$ wherever it answers:
+for every id $u$ on which $V$ returns level, adjacency, or vector
+without error, that data equals $I$'s. Running the fixed engine over $V$
+with the committed $(e^*,L,P)$ and client $(q,k,\mathit{ef})$, exactly
+one of the following holds. \emph{(i)} The engine requests data for some
+$u\notin\mathrm{dom}(V)$ and aborts. \emph{(ii)} The engine never leaves
+$\mathrm{dom}(V)$, and its step-by-step execution is identical to
+$S(I,q,k,\mathit{ef})$: it touches the same set
+$T'=T\subseteq\mathrm{dom}(V)$ and returns the same list.
+
+\end{lemma}
+
+\begin{proof}
+
+The engine's control state after each step is a deterministic function
+of $(q,k,\mathit{ef},P,e^*)$ and the sequence of view responses so far:
+every branch tests only the parameters or $(\mathit{dist},\mathit{id})$
+tuples whose distances are of already-read vectors and whose ids came
+from already-read adjacency, with no ambient state, floating point, or
+clock. Induct on execution steps. \emph{Base:} both runs start at $e^*$
+with an empty visited set and empty heaps, hence in the same state.
+\emph{Step:} assume identical state before the next access to $u$. If
+$u\notin\mathrm{dom}(V)$, case~(i) fires. Otherwise $V$'s response for
+$u$ equals $I$'s, so both runs receive identical data, take the
+identical branch, and reach an identical successor state. The two traces
+therefore coincide until, if ever, an out-of-domain access, giving~(i)
+or~(ii).
+
+\end{proof}
+
+\subsection{The verifier}
+
+$\mathsf{Verify}(\delta,q,k,\mathit{ef},\pi)$ proceeds in six stages:
+(1) dimension and empty-index conventions; (2) batch Merkle verification
+of all openings against $(\mathit{root},n)$; (3) strict payload decoding
+with the position--identity check
+\texttt{decoded.id}${=}$\texttt{position}; (4) replay of the \emph{same}
+engine over the partial view built from the openings, aborting on any
+access outside it; (5) bit-exact equality of the replayed list with
+$\pi.\mathsf{result}$; and (6) a tightness check that the replay's
+touched set equals the opened set.
+
+The query parameters $(q,k,\mathit{ef})$ are client inputs to
+$\mathsf{Verify}$, not fields of $\pi$: the server commits $\delta$
+first and then answers whatever query the client issues, so it cannot
+understate $\mathit{ef}$. Stage~(4) replays at beam
+$\max(\mathit{ef},k,1)$ with the client's $\mathit{ef}$; a server that
+searched at a smaller effective beam opened fewer leaves, so the
+honest-$\mathit{ef}$ replay reaches a node it never opened and aborts.
+The lazy-$\mathit{ef}$ guarantee is therefore not circular:
+$\mathit{ef}$ is pinned by the client, echoed into the replay, and $T$
+is taken at that $\mathit{ef}$.
+
+\subsection{Soundness}
+
+The bound below holds under four standing assumptions. \textbf{(A1)} the
+hash (blake3) is collision resistant. \textbf{(A2)} the verifier replays
+the \emph{same} engine that defines $S$ --- a single
+\texttt{search\_with\_view} generic over \texttt{IndexView} --- so
+prover and verifier agree by construction rather than through a
+duplicated implementation. \textbf{(A3)} arithmetic is integer-exact
+with a total $(\mathit{dist},\mathit{id})$ order and hash-derived
+levels, making $S$ platform-independent and replay bit-exact.
+\textbf{(A4)} the batched multiproof verifier accepts a set of openings
+iff each constituent per-leaf opening would. Only (A1) enters the bound;
+(A2)--(A4) license the steps of the proof.
+
+\begin{theorem}[Soundness]\label{thm:soundness}
+
+Let $\delta=\mathsf{Commit}(I)$. For every PPT adversary $\mathcal{A}$
+outputting $(q,k,\mathit{ef},\pi)$,
+\[
+\Pr\!\left[\mathsf{Verify}(\delta,q,k,\mathit{ef},\pi)=1 \;\wedge\; \pi.\mathsf{result}\neq S(I,q,k,\mathit{ef})\right] \;\le\; \mathsf{Adv}^{\mathrm{CR}}_{\mathrm{blake3}}(\mathcal{B}),
+\]
+for an explicit reduction $\mathcal{B}$ that extracts a blake3 collision
+from any accepting, deviating transcript.
+
 \end{theorem}
-% + Completeness, Tightness propositions, and the scope discussion
-% ("execution, not optimum") — reviewers' first objection, answered
-% before they raise it.
+
+\begin{proof}
+
+Suppose $\mathsf{Verify}$ accepts. By Lemma~\ref{lem:binding}, every
+opened payload equals $I$'s payload at its position: a mismatch would
+yield two verifying openings for one position, from which $\mathcal{B}$
+(below) extracts a collision. Stage~(3)'s identity check forbids
+transplanting node $j$'s content to position $i$, so the opened view $V$
+is a restriction of $I$ --- exactly the hypothesis of
+Lemma~\ref{lem:coincidence}. Since Stage~(4) ran to completion, case~(i)
+of that lemma (a \texttt{MissingNode} abort) is excluded, so case~(ii)
+holds: the replay touches exactly $T(I,q,k,\mathit{ef})$ and returns
+$S(I,q,k,\mathit{ef})$. Stage~(5) then forces
+$\pi.\mathsf{result}=S(I,q,k,\mathit{ef})$, contradicting the assumed
+deviation.
+
+\end{proof}
+
+\noindent\textbf{The reduction $\mathcal{B}$.} $\mathcal{B}$ holds $I$
+(which fixes $\delta$) and the accepting, deviating transcript. At the
+deviating position $i$ it has two payloads --- the transcript's
+$\mathit{payload}^{\mathcal{A}}$ and $I$'s true $\mathit{payload}^{I}$
+--- that differ yet both verify against $\mathit{root}$. It recomputes
+$i$'s honest authentication path from $I$ and walks it against the
+transcript's path from the leaf upward. If
+$H_{\mathrm{leaf}}(\mathit{payload}^{\mathcal{A}})=H_{\mathrm{leaf}}(\mathit{payload}^{I})$
+while the payloads differ, that leaf pair is already a collision;
+otherwise the leaf hashes differ and $\mathcal{B}$ ascends to the first
+internal level whose two nodes carry equal hashes but distinct child
+pairs, a collision of $H_{\mathrm{node}}$. Domain separation keeps the
+colliding inputs in one domain. Because $\mathcal{B}$ locates the
+divergence deterministically against $I$ rather than guessing, no factor
+of $|T|$ or $n$ enters and the bound carries no slack.
+
+\begin{proposition}[Completeness]\label{prop:complete}
+
+The honest prover runs the same engine over the full index and opens
+exactly the recorded touched set; its proofs therefore always verify. In
+debug builds the prover self-checks this.
+
+\end{proposition}
+
+\begin{proposition}[Tightness]\label{prop:tight}
+
+If $\mathsf{Verify}$ accepts, the opened set equals
+$T(I,q,k,\mathit{ef})$: Lemma~\ref{lem:coincidence}(ii) gives $T'=T$,
+Stage~(4) rules out omissions (\texttt{MissingNode}), and Stage~(6)
+rules out padding (\texttt{UnusedOpenings}). Hence
+$|\mathit{VO}|=\Theta(|T|\cdot(\mathit{payload}+\text{amortized path}))$
+--- the proof is precisely the search's data footprint, and reported
+proof sizes are not gameable in either direction.
+
+\end{proposition}
+
+\subsection{Scope}
+
+We close by delimiting what the guarantee does and does not claim.
+
+\begin{itemize}
+\item \emph{Execution, not optimum.} Verifying the true top-$k$ of an
+  approximate index is either meaningless or as costly as exact search;
+  trace consistency instead binds the answer to the canonical execution
+  on the committed index, catching result tampering, lazy $\mathit{ef}$,
+  entry-point games, and stale copies at per-query cost.
+\item \emph{Quality lives in the commitment.} A server may commit a poor
+  index but cannot misrepresent what that index returns; clients
+  calibrate expectations from the committed parameters and published
+  recall curves.
+\item \emph{Adaptivity adds nothing.} $\delta$ is fixed before queries
+  and each verification is stateless and per-query, so the bound
+  survives any adaptive strategy by a union bound over queries.
+\item \emph{Which resource is sublinear.} Succinctness is in $n$:
+  $|\mathit{VO}|=\Theta(|T|\cdot(\mathit{payload}+\text{amortized
+  path}))$ with $|T|\ll n$, tracking the search's footprint rather than
+  the index. Dependence on $d$ is linear at Tier-1 (each opened payload
+  carries a raw $d$-vector) and is the target of the Tier-2 aggregated
+  inner-product argument (\S\ref{sec:discussion}); verifier time is
+  $O(|T|\cdot\deg\cdot\mathit{dim}+|\mathit{VO}|\cdot\mathit{hash})$ and
+  its working memory is $O(n)$ for an $n$-bit visited bitmap. We
+  headline $|\mathit{VO}|$ and do not claim sublinear verifier space.
+\end{itemize}
 
 \section{Implementation}\label{sec:impl}
 % Rust workspace, 4 crates, 3,032 LOC, 42 tests incl. adversarial suite;
