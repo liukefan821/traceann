@@ -904,14 +904,75 @@ Proof padded with unused leaves     & (6) & \texttt{UnusedOpenings} \\
 \end{table}
 
 \section{Discussion and Future Work}\label{sec:discussion}
-% Tier-2: replace raw vectors in leaves with Pedersen commitments +
-% one aggregated inner-product argument → VO sublinear in d (the d
-% sweep is the motivation); journaled epochs for dynamic updates and
-% freshness; verifiable filtered search; SIMD distance kernels
-% (reorder-safe by integer associativity).
+
+The one place \sys{}'s proof is not succinct is its dependence on the
+ambient dimension: every opened leaf carries a raw $d$-byte vector, so
+the verification object grows linearly in $d$ (\S\ref{sec:eval},
+Figure~\ref{fig:d}). The design anticipates a second tier that removes
+this. Because a leaf payload is
+$\mathrm{adjbytes}(i)\,\|\,\mathrm{vecbytes}(i)$ and the Merkle
+machinery hashes payloads opaquely, the raw vector can be replaced by a
+constant-size ($32$-byte) Pedersen commitment to that vector without
+touching the commitment structure or the traversal logic at all --- the
+graph, the domain separation, and the six-stage verifier are unchanged.
+The distances the replay recomputes are then discharged not by
+re-reading vectors but by a single aggregated inner-product argument
+\cite{bunz2018bulletproofs} over all touched nodes, whose size is
+logarithmic in the total coordinate count rather than linear in $d$ per
+node. This turns the $d$-linear payload term of Table~\ref{tab:d} into a
+sublinear one while preserving trace consistency, which is why we report
+the Tier-1 numbers as a floor rather than a limit.
+
+\sys{} today verifies against a single committed snapshot; the freshness
+of that snapshot across re-commitments is out of scope
+(\S\ref{sec:model}). The natural extension is a journaled commitment:
+each update publishes a new root together with a signed link to its
+predecessor, forming a hash chain of epochs that a client can audit for
+monotonic progress and against which a server cannot silently roll back.
+Combined with the sharding-style incremental updates that graph-based
+authenticated indexes already support, this would carry trace
+consistency from a static index to a mutable one without changing the
+per-query proof.
+
+Two further directions follow naturally. First, real retrieval
+increasingly couples nearest-neighbor search with metadata predicates;
+extending trace consistency to \emph{filtered} search --- proving that
+the returned results are exactly those the canonical traversal visits
+subject to a committed predicate --- would cover a large class of
+production queries, and the deterministic-execution framing transfers
+directly. Second, the integer-exact distance kernels are associative by
+construction (\S\ref{sec:design}), so a SIMD or GPU implementation may
+reorder accumulation freely; this promises a large constant-factor
+speedup in both proving and verification with no effect on the committed
+bytes, since determinism is a property of the arithmetic, not the
+schedule.
+
+Two limitations bound the present results. The synthetic generator's
+recall degrades beyond $n\approx10^5$ as its fixed low-dimensional
+centroid subspace saturates (\S\ref{sec:eval}); this is a property of
+the benchmark, not the index, and the real SIFT1M results are
+unaffected, but a generator whose global subspace scales with $\log n$
+would make the synthetic $n$ sweep faithful at larger scales. And by
+design \sys{} reveals the query's access pattern through the set of
+opened nodes --- the cost of an always-on, single-server,
+non-interactive proof; applications that must hide the access pattern
+need the heavier zero-knowledge machinery discussed in
+\S\ref{sec:related}, at a per-query cost incompatible with the always-on
+setting \sys{} targets.
 
 \section{Conclusion}\label{sec:conclusion}
-% Three sentences. Write last.
+
+\sys{} shows that integrity for graph-based approximate nearest-neighbor
+search can be made always-on and cheap by verifying the \emph{execution}
+rather than the optimum: a returned result is accepted only if it is
+bit-for-bit the output of a canonical, deterministic search over a
+Merkle-committed index, a property we prove sound by reduction to a hash
+collision. On a million-vector SIFT1M index this costs a $607$\,KiB
+proof and $2.7$\,ms of client verification per query at $0.956$ recall,
+driven by a reproducible, integer-exact engine whose commitments match
+to the byte across architectures. The complete system is open source,
+and its layered commitment leaves a clear path to proofs that are
+succinct in the ambient dimension as well.
 
 \bibliographystyle{plain}
 \bibliography{refs}
