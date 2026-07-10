@@ -740,43 +740,168 @@ We close by delimiting what the guarantee does and does not claim.
 \end{itemize}
 
 \section{Implementation}\label{sec:impl}
-% Rust workspace, 4 crates, 3,032 LOC, 42 tests incl. adversarial suite;
-% zero-GPU; blake3; per-crate table (ta-core 1,303 / ta-commit 671 /
-% ta-proof 477 / ta-bench 581). Cross-platform golden-digest test.
-% Debug-build prover self-verification as an engineering guardrail.
+
+\sys{} is a Rust workspace of about $3{,}000$ lines across four crates:
+\texttt{ta-core} (the deterministic engine, the graph, and the view
+interface, $1{,}303$ lines), \texttt{ta-commit} (canonical payloads, the
+domain-separated Merkle tree, and multiproofs, $671$ lines),
+\texttt{ta-proof} (the prover, the six-stage verifier, and the
+adversarial test suite, $477$ lines), and \texttt{ta-bench} (the
+measurement harness, $581$ lines). The only external dependency is the
+\texttt{blake3} hash; there is no GPU code and no floating point on the
+query path. The suite has $42$ tests, and because every proof produced
+during a benchmark sweep is verified, the harness doubles as a large
+randomized end-to-end test. Two guardrails protect the properties the
+paper depends on: a golden-digest test asserts that a fixed index and
+query hash to the same bytes on x86-64 Linux and aarch64 macOS --- a
+determinism regression stops the build --- and in debug builds the
+prover verifies its own proof before returning it.
 
 \section{Evaluation}\label{sec:eval}
-% 7.1 Setup: hardware; methodology (min-of-3, median/p95); synthetic
-%     data model + the four observed failure modes that shaped it
-%     (distance concentration; uniform intra-cluster; islands when
-%     cluster ≥ ef_c; centroid concentration) — from bench/README.md.
-% 7.2 SIFT1M headline (lossless int8 shift; official GT):
+
+\subsection{Setup}
+
+All timings are single-threaded on one core of a commodity x86-64
+machine\todo{state exact CPU / clock / RAM}. Each operation ---
+plaintext search, prove, verify --- is run three times per query and the
+minimum wall time is kept as the best estimator of intrinsic cost under
+scheduler noise; tables report the median and, where noted, the p95
+across the query set. Proof-size metrics (opened leaves and wire bytes)
+are exact and, like the commitments, reproduce byte-for-byte on any
+machine, so only latencies are hardware-dependent.
+
+Two data regimes are used. The synthetic \emph{clustered} generator
+plants points in roughly $32$-point clusters whose centroids occupy a
+fixed ${\sim}16$-dimensional global subspace, with each cluster adding
+noise in its own ${\sim}16$-dimensional subspace; intrinsic
+dimensionality is therefore held near $32$ while the ambient dimension
+$d$ varies, mirroring real embedding models and letting the $d$ sweep
+isolate the payload term of the proof with the opened-leaf count roughly
+flat. The design is deliberate: uniform random data concentrates
+distances and collapses recall, full-dimensional cluster noise reduces
+to the same high-dimensional uniform subproblem, clusters larger than
+the construction beam degenerate layer~$0$ into disconnected islands,
+and uniform random centroids leave no gradient for coarse navigation ---
+each generator knob fixes one of these failure modes we observed
+empirically. The real regime is SIFT1M: its descriptors are integers in
+$[0,255]$, and the affine shift $q=x-128$ embeds them into int8
+losslessly (squared Euclidean distance is translation-invariant), so
+recall is measured against the official float ground truth with no
+quantization confound.
+
+\subsection{End-to-end cost on SIFT1M}
+
+Table~\ref{tab:sift} and Figure~\ref{fig:sift} report the end-to-end
+cost on a one-million-vector index. At $\mathit{ef}=64$ the engine
+reaches recall@$10=0.956$ while opening $1{,}217$ of the million leaves;
+the resulting proof is $607$\,KiB, produced in $325\,\mu$s ---
+$8.4\times$ a plaintext search --- and verified in $2.7$\,ms. Sweeping
+$\mathit{ef}$ traces a smooth accuracy--cost frontier: recall climbs
+from $0.771$ to $0.996$ as the proof grows from $250$ to $1{,}689$\,KiB
+and verification from $1.1$ to $7.3$\,ms, with prover overhead holding
+near $8\times$ throughout. The one-off costs --- a $0.59$\,s commitment
+and a $307$\,s index build --- are amortized over the lifetime of the
+index and irrelevant to per-query verification.
+
 \begin{table}[t]\centering
 \caption{SIFT1M ($n{=}10^6$, $d{=}128$, $m{=}16$,
 $\mathit{ef}_c{=}200$): recall vs.\ official ground truth and
 verification costs.}\label{tab:sift}
 \input{../bench/figures/table2_sift.tex}
 \end{table}
+
 \begin{figure}[t]\centering
 \includegraphics[width=\linewidth]{fig4_sift1m.pdf}
 \caption{SIFT1M: VO size along the recall Pareto frontier (left) and
 search/prove/verify latencies (right).}\label{fig:sift}
 \end{figure}
-% 7.3 Controlled sweeps:
+
+\subsection{Controlled sweeps}
+
+The ambient-dimension sweep (Figure~\ref{fig:d}, Table~\ref{tab:d})
+isolates how the proof scales with $d$ at fixed intrinsic dimension. As
+$d$ grows from $64$ to $768$ the number of opened leaves does not rise
+--- it drifts down from $938$ to $554$ --- yet the proof grows from
+$290$ to $556$\,KiB, because each opened payload carries a raw $d$-byte
+vector: the growth is entirely in the payload term, exactly the Tier-1
+behavior the succinct tier is meant to remove (\S\ref{sec:discussion}).
+Prover overhead relative to plaintext search falls from $11.9\times$ to
+$3.5\times$ over the same range, since hashing the touched set is nearly
+$d$-independent while the plaintext distance work it is measured against
+grows with $d$.
+
 \begin{figure}[t]\centering
 \includegraphics[width=\linewidth]{fig1_vo_vs_d.pdf}
 \caption{Fixed intrinsic dimension, varying ambient $d$: VO grows with
 the payload term while opened leaves do not.}\label{fig:d}
 \end{figure}
+
 \begin{table}[t]\centering
 \caption{Ambient-dimension sweep ($n{=}50$k, $\mathit{ef}{=}64$).}
 \label{tab:d}
 \input{../bench/figures/table1_d_sweep.tex}
 \end{table}
-% + fig2 (ef sweep incl. recall panel), fig3 (n sweep, log-x),
-%   commit throughput (0.59 s for 10^6 leaves), build cost (307 s).
-% 7.4 Attack detection: table mapping attacks → rejecting stage/error
-%     (from the ta-proof adversarial suite).
+
+The effort sweep (Figure~\ref{fig:ef}) confirms that $\mathit{ef}$ is
+the single knob trading verification cost for accuracy: recall and proof
+size rise together as the beam widens, so a client selects its point on
+the frontier by the recall it needs and pays proportionally in proof
+bytes and verification time.
+
+\begin{figure}[t]\centering
+\includegraphics[width=\linewidth]{fig2_vo_vs_ef.pdf}
+\caption{Effort sweep: recall and VO both rise with $\mathit{ef}$, the
+knob that trades verification cost for accuracy.}\label{fig:ef}
+\end{figure}
+
+The index-size sweep (Figure~\ref{fig:n}, log-scaled in $n$) shows the
+opened-leaf count --- and thus the proof --- growing far more slowly
+than the index, the property that keeps verification succinct as the
+corpus scales. One caveat is specific to the synthetic generator: recall
+dips around $n=10^5$ because the fixed $16$-dimensional centroid
+subspace saturates at roughly $n/32$ clusters; this is an artifact of
+the data model, not the index, and the real SIFT1M results at $n=10^6$
+are unaffected.
+
+\begin{figure}[t]\centering
+\includegraphics[width=\linewidth]{fig3_vo_vs_n.pdf}
+\caption{Index-size sweep (log $x$): opened leaves grow far slower than
+$n$, so the proof stays succinct as the index scales.}\label{fig:n}
+\end{figure}
+
+\subsection{Attack detection}
+
+Finally, the adversarial suite in \texttt{ta-proof} instantiates each
+server behavior from the threat model of \S\ref{sec:model} and confirms
+that it is rejected --- not by a catch-all check, but by the specific
+stage the design assigns to it (Table~\ref{tab:attacks}). Tampering with
+committed data or answering from a different index fails Merkle
+verification; identity forgery and malformed payloads fail strict
+decoding; a lazy or truncated search is caught when the honest-parameter
+replay reaches an unopened node; a doctored result fails the bit-exact
+comparison; and a padded proof fails the tightness check. The mapping is
+exhaustive over the capabilities enumerated in \S\ref{sec:model}.
+
+\begin{table}[t]\centering\footnotesize
+\caption{Every adversarial behavior from \S\ref{sec:model} is rejected
+by a specific verification stage, as exercised by the \texttt{ta-proof}
+attack suite.}\label{tab:attacks}
+\begin{tabular}{@{}lcl@{}}
+\toprule
+Attack & Stage & Rejecting check \\
+\midrule
+Non-empty result on an empty index & (1) & \texttt{EmptyIndexNonEmptyResult} \\
+Modified vector or edge            & (2) & \texttt{BadOpening} \\
+Proof against a different index     & (2) & \texttt{BadOpening} \\
+A required opening dropped          & (2) & \texttt{BadOpening} \\
+Node $j$ served at position $i$     & (3) & \texttt{IdMismatch} \\
+Non-canonical / malformed payload   & (3) & \texttt{MalformedPayload} \\
+Lazy or smaller-$\mathit{ef}$ search & (4) & \texttt{MissingNode} \\
+Reordered or substituted top-$k$    & (5) & \texttt{ResultMismatch} \\
+Proof padded with unused leaves     & (6) & \texttt{UnusedOpenings} \\
+\bottomrule
+\end{tabular}
+\end{table}
 
 \section{Discussion and Future Work}\label{sec:discussion}
 % Tier-2: replace raw vectors in leaves with Pedersen commitments +
