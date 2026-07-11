@@ -59,6 +59,10 @@ crates, $\sim$3{,}000 lines, adversarial test suite) is open source at
 \url{https://github.com/liukefan821/traceann}.
 \end{abstract}
 
+\noindent\textbf{Keywords:} Verifiable computation; Approximate
+nearest neighbor search; Authenticated data structures; Query
+integrity; Retrieval-augmented generation; Merkle commitments
+
 \section{Introduction}\label{sec:intro}
 
 Approximate nearest neighbor (ANN) search over high-dimensional
@@ -786,9 +790,9 @@ measurement harness, $581$ lines). The only external dependency is the
 query path. The suite has $42$ tests, and because every proof produced
 during a benchmark sweep is verified, the harness doubles as a large
 randomized end-to-end test. Two guardrails protect the properties the
-paper depends on: a golden-digest test asserts that a fixed index and
-query hash to the same bytes on x86-64 Linux and aarch64 macOS --- a
-determinism regression stops the build --- and in debug builds the
+paper depends on: a golden-digest test pins the bytes of a fixed index and query,
+which we confirm reproduce identically on x86-64 Linux and aarch64
+macOS --- a determinism regression stops the build --- and in debug builds the
 prover verifies its own proof before returning it.
 
 \section{Evaluation}\label{sec:eval}
@@ -968,13 +972,10 @@ authenticated indexes already support, this would carry trace
 consistency from a static index to a mutable one without changing the
 per-query proof.
 
-Two further directions follow naturally. First, real retrieval
-increasingly couples nearest-neighbor search with metadata predicates;
-extending trace consistency to \emph{filtered} search --- proving that
-the returned results are exactly those the canonical traversal visits
-subject to a committed predicate --- would cover a large class of
-production queries, and the deterministic-execution framing transfers
-directly. Second, the integer-exact distance kernels are associative by
+Two further directions follow naturally. First, extending trace consistency to \emph{filtered} search ---
+nearest-neighbor queries under a committed metadata predicate --- is
+a natural direction that our deterministic-execution framing should
+support. Second, the integer-exact distance kernels are associative by
 construction (\S\ref{sec:design}), so a SIMD or GPU implementation may
 reorder accumulation freely; this promises a large constant-factor
 speedup in both proving and verification with no effect on the committed
