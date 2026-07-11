@@ -14,6 +14,8 @@
 \usepackage{graphicx}
 \usepackage[hidelinks]{hyperref}
 \usepackage{xcolor}
+\usepackage{tikz}
+\usetikzlibrary{positioning,arrows.meta}
 
 \graphicspath{{../bench/figures/}}
 
@@ -490,7 +492,7 @@ the result (\S\ref{sec:security}).
 
 \subsection{One engine, two views}
 
-The prover and the verifier run \emph{the same} search procedure. Node
+The prover and the verifier run \emph{the same} search procedure (Figure~\ref{fig:protocol}). Node
 data is reached only through a narrow view interface exposing level,
 adjacency, and vector lookups, each of which may report a missing
 identifier; the search function is generic over that interface. The
@@ -504,7 +506,39 @@ second engine to drift out of sync. This is the assumption the soundness
 bound rests on (A2 in \S\ref{sec:security}), discharged by construction
 rather than by testing.
 
-\todo{protocol-flow figure: commit, recorded search, multiproof, replay}
+\begin{figure}[t]\centering
+\begin{tikzpicture}[
+  font=\small, >=Stealth,
+  box/.style={draw, rounded corners, align=center, inner sep=5pt,
+              minimum height=1.5cm, text width=2.9cm}
+]
+\node[box] (commit)
+  {\textbf{Commit}\\(owner)\\[3pt]\footnotesize hash canonical
+   payloads into a Merkle root};
+\node[box, right=1.3cm of commit] (prove)
+  {\textbf{Prove}\\(server)\\[3pt]\footnotesize run the engine over the
+   full index, record the touched set, open it by multiproof};
+\node[box, right=1.3cm of prove] (verify)
+  {\textbf{Verify}\\(client)\\[3pt]\footnotesize replay the \emph{same}
+   engine over the opened view; accept iff bit-exact and tight};
+\draw[->] (commit) -- node[above]{$\delta$} (prove);
+\draw[->] (prove) -- node[above]{$\pi$} (verify);
+\node[above=0.5cm of prove] (q) {\footnotesize $(q,k,\mathit{ef})$};
+\draw[->] (q) -- (prove);
+\node[right=0.8cm of verify, align=center] (out)
+  {\footnotesize accept\\/ reject};
+\draw[->] (verify) -- (out);
+\end{tikzpicture}
+\caption{The \sys{} protocol. The owner commits the index to a digest
+$\delta$; the server answers a query by running the deterministic
+engine over the full index, recording the touched set, and opening
+exactly those leaves as a proof $\pi$; the client, holding $\delta$,
+replays the \emph{same} engine over the opened view and accepts only if
+the replay reproduces the claimed result bit-for-bit and opens no more
+than it uses. Because prover and verifier share one
+\texttt{search\_with\_view} implementation, their agreement is
+structural.}\label{fig:protocol}
+\end{figure}
 
 \section{Security Analysis}\label{sec:security}
 
@@ -761,8 +795,8 @@ prover verifies its own proof before returning it.
 
 \subsection{Setup}
 
-All timings are single-threaded on one core of a commodity x86-64
-machine\todo{state exact CPU / clock / RAM}. Each operation ---
+All timings are single-threaded on one core of an Apple M1 Pro
+(MacBook Pro 14-inch, 2021) with 16\,GB of unified memory. Each operation ---
 plaintext search, prove, verify --- is run three times per query and the
 minimum wall time is kept as the best estimator of intrinsic cost under
 scheduler noise; tables report the median and, where noted, the p95
