@@ -52,7 +52,7 @@ encodings, a total $(\mathit{dist},\mathit{id})$ order) lets one code
 path serve as both prover and verifier, yielding bit-identical digests
 across x86-64 and aarch64. On SIFT1M ($10^6$ vectors, official ground
 truth, embedded losslessly in int8), \sys{} attains recall@10 $=0.956$
-with a $622$\,KB proof per query, $325\,\mu$s proving ($8.4\times$
+with a $607$\,KiB proof per query, $325\,\mu$s proving ($8.4\times$
 plaintext search) and $2.7$\,ms client-side verification; committing
 the full index takes $0.6$\,s. The complete Rust implementation (four
 crates, $\sim$3{,}000 lines, adversarial test suite) is open source at
@@ -150,7 +150,7 @@ verifies yet deviates from the canonical output to a collision of the
 underlying hash (\S\ref{sec:security}).
 
 On SIFT1M ($10^6$ vectors, official ground truth, embedded losslessly
-into int8), \sys{} attains recall@10 $=0.956$ with a $622$\,KB proof per
+into int8), \sys{} attains recall@10 $=0.956$ with a $607$\,KiB proof per
 query, $325\,\mu$s proving ($8.4\times$ a plaintext search), and
 $2.7$\,ms client-side verification, while committing the full index
 takes $0.6$\,s. Controlled synthetic sweeps isolate how the proof scales
@@ -179,7 +179,7 @@ Contributions:
   \S\ref{sec:impl}).
   \item \textbf{C4 --- Evaluation.} SIFT1M at $n{=}10^6$ against the
   official ground truth via a lossless int8 embedding: recall@10
-  $0.956$ at $622$\,KB VO, $325\,\mu$s proving, $2.7$\,ms verification;
+  $0.956$ at $607$\,KiB VO, $325\,\mu$s proving, $2.7$\,ms verification;
   controlled synthetic sweeps isolating VO scaling in $d$, $ef$, $n$;
   an adversarial suite in which lazy-server and tampering attacks are
   caught by construction (\S\ref{sec:eval}).
